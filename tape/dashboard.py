@@ -69,6 +69,17 @@ LOGIN_TEMPLATE = """
 """
 
 
+@app.after_request
+def _no_cache(resp):
+    # The page ships its CSS inline, so a cached HTML copy also pins stale
+    # styling. Force a fresh fetch every load — palette/layout edits then show
+    # up on a normal refresh instead of being masked by the browser cache.
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.before_request
 def _require_login():
     if request.endpoint in ("login", "logout", "static"):
@@ -311,8 +322,8 @@ _PAGE = """<!doctype html>
   /* MAGI terminal palette — copied from the archived MAGI dashboard */
   :root{
     --bg:#000000; --panel-bg:#0a0a0a;
-    --magi-cyan:#00d4d4; --magi-orange:#ff6600; --magi-orange-bright:#ffc266;
-    --magi-text:#ffb157; --magi-text-dim:#e8a05a; --magi-grid:#221100;
+    --magi-cyan:#00e5e5; --magi-orange:#ff6600; --magi-orange-bright:#ffd27a;
+    --magi-text:#ffc36b; --magi-text-dim:#f3b877; --magi-grid:#221100;
     --signal-green:#00ff66; --signal-amber:#ffaa00; --signal-red:#ff3333;
   }
   body{background:var(--bg);
@@ -334,13 +345,13 @@ _PAGE = """<!doctype html>
   .card.head::before,.card.head::after{display:none}
   /* verdict glow — copied verbatim from the MAGI .verdict-* / agent-health panels:
      the border + background take the signal colour, box-shadow on top */
-  .card.glow-green{border-color:var(--signal-green);background:rgba(0,255,102,.10);box-shadow:0 0 10px rgba(0,255,102,.35)}
-  .card.glow-yellow{border-color:var(--signal-amber);background:rgba(255,170,0,.10);box-shadow:0 0 10px rgba(255,170,0,.35)}
-  .card.glow-red{border-color:var(--signal-red);background:rgba(255,51,51,.12);box-shadow:0 0 12px rgba(255,51,51,.45);
+  .card.glow-green{border-color:var(--signal-green);background:rgba(0,255,102,.14);box-shadow:0 0 16px rgba(0,255,102,.55)}
+  .card.glow-yellow{border-color:var(--signal-amber);background:rgba(255,170,0,.14);box-shadow:0 0 16px rgba(255,170,0,.55)}
+  .card.glow-red{border-color:var(--signal-red);background:rgba(255,51,51,.16);box-shadow:0 0 18px rgba(255,51,51,.60);
     animation:glow-red-pulse 1.4s ease-in-out infinite alternate}
   .card.glow-gray{}
   @keyframes glow-red-pulse{from{box-shadow:0 0 6px rgba(255,51,51,.4)}to{box-shadow:0 0 14px rgba(255,51,51,.85)}}
-  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange);
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange-bright);
     margin:0 0 9px;border-left:4px solid var(--magi-orange);padding-left:8px}
   .row{display:flex;justify-content:space-between;padding:2px 0;gap:10px}
   .k{color:var(--magi-text-dim);white-space:nowrap}
