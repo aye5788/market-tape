@@ -95,10 +95,40 @@ Deploy: `systemctl restart magi-dashboard` (re-enable if needed). It reads
 `market_tape.db`, so it works whether or not the collector is up — it just
 shows "COLLECTOR NOT REPORTING" until the collector writes health beacons.
 
-Panels: process health (ws state / reconnects / rows written-dropped, from
-the `collector_health` beacon), feed freshness, throughput + trades/min
-sparkline, market snapshot, storage usage, rollup status. Page polls
-`/api/status` every 2s.
+Panels: **Data Quality** (the full-width control-panel headline — see below),
+process health (ws state / reconnects / rows written-dropped, from the
+`collector_health` beacon), feed freshness, throughput + trades/min sparkline,
+market snapshot, storage usage, rollup status. Page polls `/api/status` every
+2s. Styled in the MAGI terminal palette (amber/orange on black, copied from the
+archived MAGI dashboard) so it reads as the same control surface.
+
+## Data quality (garbage-in guard)
+
+`tape/quality.py` is a read-only report that answers one question: is the tape
+trustworthy, or is it ingesting garbage that makes it useless as a reality
+anchor? It runs ~10 checks over a trailing window (default 24h) from tables the
+collector already writes — no new deps, no writes — and rolls them into one
+GREEN / YELLOW / RED verdict shown as the dashboard headline (and in
+`/api/status` under `quality`).
+
+Checks: 1m **coverage** (% of expected bars present in the captured span),
+largest contiguous **gap**, last-bar **freshness**, bar **validity**
+(low≤o,c≤high, positive, vol≥0), **spread integrity** (no crossed/zero/null
+bbo), **trade validity** + **ordering**, **price anomalies** (1m close jumps
+>5% ≈ bad print), **rollup consistency** (completed 1h buckets must reconcile
+to their 1m volume), and the **collector beacon** (alive + connected).
+
+Thresholds are anchored to sane exogenous bounds (a 1m bar closes every 60s;
+XRP doesn't move >5% in a minute absent a bad print; a *completed* rollup bucket
+must reconcile exactly), NOT fitted to the data — they flag corruption, not
+normal market behaviour. The rollup check deliberately ignores the in-progress
+bucket, which always lags the live minute.
+
+One-shot report from the CLI:
+
+```bash
+/root/xrp_grid/venv/bin/python3 -m tape.quality
+```
 
 ## Backups (durability, not capacity)
 

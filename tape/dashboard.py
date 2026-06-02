@@ -17,6 +17,7 @@ from flask import (Flask, jsonify, redirect, render_template_string,
                    request, session, url_for)
 
 from tape import config
+from tape import quality
 
 # Reuse the EXISTING dashboard plumbing: this app is served by the same
 # magi-dashboard.service on :5000 behind the same ethobs.uk cloudflared
@@ -238,6 +239,13 @@ def build_status():
         except Exception:
             pass
         out["rollup"] = rollup
+
+        # ---- data quality (the control-panel headline) ----
+        try:
+            out["quality"] = quality.report(c, now)
+        except Exception as e:
+            out["quality"] = {"verdict": "gray", "checks": [],
+                              "error": str(e), "window_hours": quality.WINDOW_HOURS}
         return out
     finally:
         c.close()
@@ -256,22 +264,48 @@ def index():
 _PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Market Tape Monitor</title>
 <style>
-  body{background:#0d1117;color:#c9d1d9;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;margin:0;padding:18px}
-  h1{font-size:16px;margin:0 0 12px;color:#e6edf3}
-  .sub{color:#8b949e;font-size:11px;margin-bottom:14px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
-  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
-  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin:0 0 8px}
+  /* MAGI terminal palette — copied from the archived MAGI dashboard */
+  :root{
+    --bg:#000000; --panel-bg:#0a0a0a;
+    --magi-cyan:#00d4d4; --magi-orange:#ff6600; --magi-orange-bright:#ff9933;
+    --magi-text:#ff9933; --magi-text-dim:#cc7722; --magi-grid:#221100;
+    --signal-green:#00ff66; --signal-amber:#ffaa00; --signal-red:#ff3333;
+  }
+  body{background:var(--bg);
+    background-image:
+      repeating-linear-gradient(0deg,transparent 0,transparent 39px,var(--magi-grid) 39px,var(--magi-grid) 40px),
+      repeating-linear-gradient(90deg,transparent 0,transparent 39px,var(--magi-grid) 39px,var(--magi-grid) 40px);
+    color:var(--magi-text);font:13px/1.5 "Courier New","Consolas","Liberation Mono",monospace;
+    margin:0;padding:20px;letter-spacing:.5px}
+  h1{font-size:18px;margin:0 0 10px;color:var(--magi-orange-bright);text-transform:uppercase;
+    letter-spacing:5px;border-bottom:2px solid var(--magi-orange);padding-bottom:8px}
+  .sub{color:var(--magi-text-dim);font-size:11px;margin-bottom:14px;letter-spacing:1px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+  .card{background:var(--panel-bg);border:2px solid var(--magi-orange);padding:12px 14px;position:relative}
+  .card::before{content:"";position:absolute;top:-2px;left:-2px;width:11px;height:11px;
+    border-top:2px solid var(--magi-orange-bright);border-left:2px solid var(--magi-orange-bright)}
+  .card::after{content:"";position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;
+    border-bottom:2px solid var(--magi-orange-bright);border-right:2px solid var(--magi-orange-bright)}
+  .card.head{grid-column:1/-1;border-color:var(--magi-orange-bright)}
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange);
+    margin:0 0 9px;border-left:4px solid var(--magi-orange);padding-left:8px}
   .row{display:flex;justify-content:space-between;padding:2px 0}
-  .k{color:#8b949e}.v{color:#e6edf3}
-  .chip{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
-  .green{background:#3fb950}.yellow{background:#d29922}.red{background:#f85149}.gray{background:#484f58}
-  .banner{padding:10px 12px;border-radius:8px;margin-bottom:14px;font-weight:600}
-  .banner.ok{background:#12261a;border:1px solid #238636;color:#3fb950}
-  .banner.bad{background:#2d1517;border:1px solid #da3633;color:#f85149}
+  .k{color:var(--magi-text-dim)}.v{color:var(--magi-orange-bright)}
+  .chip{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle}
+  .green{background:var(--signal-green)}.yellow{background:var(--signal-amber)}
+  .red{background:var(--signal-red)}.gray{background:#665522}
+  .verdict{font-size:26px;letter-spacing:6px;font-weight:bold;text-transform:uppercase;
+    font-family:"Arial Black","Helvetica",sans-serif}
+  .v-green{color:var(--signal-green);text-shadow:0 0 12px rgba(0,255,102,.4)}
+  .v-yellow{color:var(--signal-amber);text-shadow:0 0 12px rgba(255,170,0,.4)}
+  .v-red{color:var(--signal-red);text-shadow:0 0 12px rgba(255,51,51,.4)}
+  .v-gray{color:#665522}
+  .banner{padding:10px 12px;margin-bottom:14px;font-weight:bold;letter-spacing:1px;border:2px solid}
+  .banner.ok{background:#001a0d;border-color:var(--signal-green);color:var(--signal-green)}
+  .banner.bad{background:#1a0000;border-color:var(--signal-red);color:var(--signal-red)}
   .spark{display:flex;align-items:flex-end;height:36px;gap:2px;margin-top:6px}
-  .spark span{flex:1;background:#1f6feb;min-height:1px;border-radius:1px}
-  .big{font-size:20px;color:#e6edf3}
+  .spark span{flex:1;background:var(--magi-cyan);min-height:1px}
+  .big{font-size:20px;color:var(--magi-orange-bright)}
 </style></head>
 <body>
   <h1>Market Tape Monitor <span id="sym" class="sub"></span></h1>
@@ -305,6 +339,19 @@ async function tick(){
   $('banner').className=bcls; $('banner').textContent=btxt;
 
   const g=[];
+
+  // data quality — the control-panel headline (full-width card, first)
+  const q=d.quality||{}, qc=q.checks||[], qv=(q.verdict||'gray');
+  let ql='';
+  for(const ch of qc){ ql+=row(chip(ch.status||'gray')+ch.label, ch.detail||'—'); }
+  if(!qc.length) ql=row('status', q.error?('error: '+q.error):'no quality data yet');
+  const okN=qc.filter(ch=>ch.status==='green'||ch.status==='gray').length;
+  const qsum=qc.length?(okN+'/'+qc.length+' ok · '+(q.window_hours||24)+'h window'):'';
+  const qhead='<div class="row" style="align-items:center;margin-bottom:8px">'
+            +'<span class="verdict v-'+qv+'">'+qv.toUpperCase()+'</span>'
+            +'<span class="k">'+qsum+'</span></div>';
+  const qgrid='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:0 18px">'+ql+'</div>';
+  g.push('<div class="card head"><h2>Data Quality</h2>'+qhead+qgrid+'</div>');
 
   // feeds
   let f=d.feeds||{}, fr='';
