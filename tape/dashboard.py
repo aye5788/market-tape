@@ -281,25 +281,33 @@ _PAGE = """<!doctype html>
     letter-spacing:5px;border-bottom:2px solid var(--magi-orange);padding-bottom:8px}
   .sub{color:var(--magi-text-dim);font-size:11px;margin-bottom:14px;letter-spacing:1px}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
-  .card{background:var(--panel-bg);border:2px solid var(--magi-orange);padding:12px 14px;position:relative}
+  .card{background:var(--panel-bg);border:2px solid var(--magi-orange);padding:14px 17px;position:relative;
+    box-shadow:0 0 9px rgba(255,102,0,.13)}
   .card::before{content:"";position:absolute;top:-2px;left:-2px;width:11px;height:11px;
     border-top:2px solid var(--magi-orange-bright);border-left:2px solid var(--magi-orange-bright)}
   .card::after{content:"";position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;
     border-bottom:2px solid var(--magi-orange-bright);border-right:2px solid var(--magi-orange-bright)}
   .card.head{grid-column:1/-1;border-color:var(--magi-orange-bright)}
   /* verdict-tinted glow on the headline card — copied from the MAGI agent cards */
-  .card.glow-green{box-shadow:0 0 14px rgba(0,255,102,.30)}
-  .card.glow-yellow{box-shadow:0 0 14px rgba(255,170,0,.35)}
-  .card.glow-red{box-shadow:0 0 16px rgba(255,51,51,.45)}
-  .card.glow-gray{box-shadow:0 0 10px rgba(102,85,34,.25)}
+  .card.glow-green{box-shadow:0 0 22px rgba(0,255,102,.55),inset 0 0 12px rgba(0,255,102,.10)}
+  .card.glow-yellow{box-shadow:0 0 22px rgba(255,170,0,.55),inset 0 0 12px rgba(255,170,0,.10)}
+  .card.glow-red{box-shadow:0 0 24px rgba(255,51,51,.70),inset 0 0 12px rgba(255,51,51,.13)}
+  .card.glow-gray{box-shadow:0 0 12px rgba(102,85,34,.35)}
   .card h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange);
     margin:0 0 9px;border-left:4px solid var(--magi-orange);padding-left:8px}
   .row{display:flex;justify-content:space-between;padding:2px 0;gap:10px}
   .k{color:var(--magi-text-dim);white-space:nowrap}
   .v{color:var(--magi-orange-bright);text-align:right;min-width:0;overflow-wrap:anywhere}
   .chip{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle}
-  .green{background:var(--signal-green)}.yellow{background:var(--signal-amber)}
-  .red{background:var(--signal-red)}.gray{background:#665522}
+  .green{background:var(--signal-green);box-shadow:0 0 6px rgba(0,255,102,.8)}
+  .yellow{background:var(--signal-amber);box-shadow:0 0 6px rgba(255,170,0,.8)}
+  .red{background:var(--signal-red);box-shadow:0 0 7px rgba(255,51,51,.9)}
+  .gray{background:#665522}
+  /* data-quality check items: stacked label+detail with breathing room */
+  .qgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(225px,1fr));gap:10px 16px;margin-top:8px}
+  .qitem{padding:7px 11px;border-left:2px solid var(--magi-orange);background:rgba(255,153,0,.04)}
+  .qlabel{color:var(--magi-orange-bright);white-space:nowrap}
+  .qdetail{color:var(--magi-text-dim);font-size:11px;margin-top:3px;overflow-wrap:anywhere}
   .verdict{font-size:26px;letter-spacing:6px;font-weight:bold;text-transform:uppercase;
     font-family:"Arial Black","Helvetica",sans-serif}
   .v-green{color:var(--signal-green);text-shadow:0 0 12px rgba(0,255,102,.4)}
@@ -349,15 +357,15 @@ async function tick(){
   // data quality — the control-panel headline (full-width card, first)
   const q=d.quality||{}, qc=q.checks||[], qv=(q.verdict||'gray');
   let ql='';
-  for(const ch of qc){ ql+=row(chip(ch.status||'gray')+ch.label, ch.detail||'—'); }
-  if(!qc.length) ql=row('status', q.error?('error: '+q.error):'no quality data yet');
+  for(const ch of qc){ ql+='<div class="qitem"><div class="qlabel">'+chip(ch.status||'gray')+ch.label
+       +'</div><div class="qdetail">'+(ch.detail||'—')+'</div></div>'; }
+  if(!qc.length) ql='<div class="qitem"><div class="qdetail">'+(q.error?('error: '+q.error):'no quality data yet')+'</div></div>';
   const okN=qc.filter(ch=>ch.status==='green'||ch.status==='gray').length;
   const qsum=qc.length?(okN+'/'+qc.length+' ok · '+(q.window_hours||24)+'h window'):'';
-  const qhead='<div class="row" style="align-items:center;margin-bottom:8px">'
+  const qhead='<div class="row" style="align-items:center;margin-bottom:4px">'
             +'<span class="verdict v-'+qv+'">'+qv.toUpperCase()+'</span>'
             +'<span class="k">'+qsum+'</span></div>';
-  const qgrid='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:0 18px">'+ql+'</div>';
-  g.push('<div class="card head glow-'+qv+'"><h2>Data Quality</h2>'+qhead+qgrid+'</div>');
+  g.push('<div class="card head glow-'+qv+'"><h2>Data Quality</h2>'+qhead+'<div class="qgrid">'+ql+'</div></div>');
 
   // feeds
   let f=d.feeds||{}, fr='';
