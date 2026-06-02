@@ -318,6 +318,9 @@ def index():
 
 _PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Market Tape Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Michroma&family=VT323&display=swap" rel="stylesheet">
 <style>
   /* MAGI terminal palette — copied from the archived MAGI dashboard */
   :root{
@@ -332,7 +335,8 @@ _PAGE = """<!doctype html>
       repeating-linear-gradient(90deg,transparent 0,transparent 39px,var(--magi-grid) 39px,var(--magi-grid) 40px);
     color:var(--magi-text);font:13px/1.5 "Courier New","Consolas","Liberation Mono",monospace;
     margin:0;padding:20px;letter-spacing:.5px}
-  h1{font-size:18px;margin:0 0 10px;color:var(--magi-orange-bright);text-transform:uppercase;
+  h1{font-family:"Michroma","Eurostile","Helvetica Neue","Arial",sans-serif;
+    font-size:20px;margin:0 0 10px;color:var(--magi-orange-bright);text-transform:uppercase;
     letter-spacing:5px;border-bottom:2px solid var(--magi-orange);padding-bottom:8px}
   .sub{color:var(--magi-text-dim);font-size:11px;margin-bottom:14px;letter-spacing:1px}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
