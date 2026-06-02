@@ -281,18 +281,21 @@ _PAGE = """<!doctype html>
     letter-spacing:5px;border-bottom:2px solid var(--magi-orange);padding-bottom:8px}
   .sub{color:var(--magi-text-dim);font-size:11px;margin-bottom:14px;letter-spacing:1px}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
-  .card{background:var(--panel-bg);border:2px solid var(--magi-orange);padding:14px 17px;position:relative;
-    box-shadow:0 0 9px rgba(255,102,0,.13)}
+  .card{background:var(--panel-bg);border:2px solid var(--magi-orange);padding:14px 18px;position:relative}
   .card::before{content:"";position:absolute;top:-2px;left:-2px;width:11px;height:11px;
     border-top:2px solid var(--magi-orange-bright);border-left:2px solid var(--magi-orange-bright)}
   .card::after{content:"";position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;
     border-bottom:2px solid var(--magi-orange-bright);border-right:2px solid var(--magi-orange-bright)}
-  .card.head{grid-column:1/-1;border-color:var(--magi-orange-bright)}
-  /* verdict-tinted glow on the headline card — copied from the MAGI agent cards */
-  .card.glow-green{box-shadow:0 0 22px rgba(0,255,102,.55),inset 0 0 12px rgba(0,255,102,.10)}
-  .card.glow-yellow{box-shadow:0 0 22px rgba(255,170,0,.55),inset 0 0 12px rgba(255,170,0,.10)}
-  .card.glow-red{box-shadow:0 0 24px rgba(255,51,51,.70),inset 0 0 12px rgba(255,51,51,.13)}
-  .card.glow-gray{box-shadow:0 0 12px rgba(102,85,34,.35)}
+  .card.head{grid-column:1/-1}
+  .card.head::before,.card.head::after{display:none}
+  /* verdict glow — copied verbatim from the MAGI .verdict-* / agent-health panels:
+     the border + background take the signal colour, box-shadow on top */
+  .card.glow-green{border-color:var(--signal-green);background:rgba(0,255,102,.10);box-shadow:0 0 10px rgba(0,255,102,.35)}
+  .card.glow-yellow{border-color:var(--signal-amber);background:rgba(255,170,0,.10);box-shadow:0 0 10px rgba(255,170,0,.35)}
+  .card.glow-red{border-color:var(--signal-red);background:rgba(255,51,51,.12);box-shadow:0 0 12px rgba(255,51,51,.45);
+    animation:glow-red-pulse 1.4s ease-in-out infinite alternate}
+  .card.glow-gray{}
+  @keyframes glow-red-pulse{from{box-shadow:0 0 6px rgba(255,51,51,.4)}to{box-shadow:0 0 14px rgba(255,51,51,.85)}}
   .card h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange);
     margin:0 0 9px;border-left:4px solid var(--magi-orange);padding-left:8px}
   .row{display:flex;justify-content:space-between;padding:2px 0;gap:10px}
