@@ -30,6 +30,8 @@ from tape import config
 # --- the grid's REAL parameters (mirror CLAUDE.md / MAGI config; exogenous) ---
 SPACING_PCT     = 0.015    # XRP optimal grid spacing
 FEE_FLOOR_PCT   = 0.005    # 2 x maker 0.25% = per-level round-trip break-even
+FIRM_SPACING_PCT = 0.0075  # 1.5 x fee floor: adaptive spacing must clear break-even
+                           # by >=0.25% to count as "firm" (vs "thin", near the floor)
 MIN_SPACING_PCT = 0.003    # config.py clamp
 MAX_SPACING_PCT = 0.025    # config.py clamp
 
@@ -64,11 +66,20 @@ def report(conn, now_ms=None, window_hours=WINDOW_HOURS):
     sigma_1m = math.sqrt(sum((r - mean) ** 2 for r in rets) / len(rets))
     sigma_hr = sigma_1m * math.sqrt(60)
     sugg = min(max(sigma_hr, MIN_SPACING_PCT), MAX_SPACING_PCT)
-    vol_status = ("red" if sigma_hr < FEE_FLOOR_PCT
-                  else "yellow" if sigma_hr < SPACING_PCT else "green")
+    margin = sugg - FEE_FLOOR_PCT   # fee headroom per round-trip at the adaptive spacing
+    # The yellow band (floor <= sigma < optimal) has a load-bearing internal
+    # gradient: near optimal the vol-tracked spacing clears fees comfortably
+    # ("firm"); near the floor the same tightening barely breaks even ("thin",
+    # the degrading-toward-too-quiet zone). Same colour, opposite recommendation.
+    if sigma_hr < FEE_FLOOR_PCT:
+        vol_status, band = "red", "too quiet"
+    elif sigma_hr < SPACING_PCT:
+        vol_status, band = "yellow", ("firm" if sigma_hr >= FIRM_SPACING_PCT else "thin")
+    else:
+        vol_status, band = "green", "ample"
     metrics.append({"label": "hourly volatility", "status": vol_status,
-                    "detail": f"{sigma_hr*100:.2f}% · suggested spacing {sugg*100:.2f}% "
-                              f"(clamp 0.3–2.5%, fee floor 0.50%)",
+                    "detail": f"σ {sigma_hr*100:.2f}% · adaptive spacing {sugg*100:.2f}% · "
+                              f"{margin*100:+.2f}% over fee floor · {band}",
                     "value": round(sigma_hr * 100, 3)})
 
     # ---- regime: efficiency ratio + net move over the window ----

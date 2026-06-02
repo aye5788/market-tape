@@ -101,8 +101,8 @@ process health (ws state / reconnects / rows written-dropped, from the
 market snapshot, storage usage, rollup status, **Backup & durability**,
 **Events** (alert + ws-state history from the `events` table), and **Grid
 Conditions** (advisory market-analytics: realized vol → suggested spacing,
-regime, flow imbalance, harvest rate — `tape/conditions.py`, enforces nothing).
-Page polls
+regime, flow imbalance, harvest rate — `tape/conditions.py`, enforces nothing —
+see below). Page polls
 `/api/status` every 2s. Styled in the MAGI terminal palette (amber/orange on
 black, Michroma title + VT323 verdict + Courier-New body — same fonts the
 archived MAGI dashboard loads) so it reads as the same control surface.
@@ -134,6 +134,85 @@ One-shot report from the CLI:
 ```bash
 /root/xrp_grid/venv/bin/python3 -m tape.quality
 ```
+
+## Grid conditions (favorability)
+
+`tape/conditions.py` is the advisory companion to Data Quality: it assumes the
+data is good and asks **would current conditions favour the adaptive grid, or
+bleed it?** Read-only, pure stdlib, 24h window. Every threshold is anchored to
+the grid's **real exogenous parameters** — 1.5% spacing, 0.50% maker round-trip
+fee floor, the 0.3–2.5% spacing clamps — NOT fitted to the data. It enforces
+nothing; the verdict is decision-support, shown in `/api/status` under
+`conditions`.
+
+The headline GREEN / YELLOW / RED is the **worst of three drivers** — hourly
+volatility, regime, harvest rate. **Flow imbalance is context only and never
+moves the verdict** (short-window flow is too noisy to gate on).
+
+- **hourly volatility** — realized σ (1m log-returns ×√60) plus a vol-tracking
+  *adaptive spacing* (σ clamped to 0.3–2.5%). 🔴 σ<0.50% (below the fee floor —
+  can't clear a round-trip), 🟡 0.50–1.5%, 🟢 ≥1.5%. The yellow band has a
+  **load-bearing internal gradient**, surfaced as `firm` vs `thin`: `firm`
+  (σ≥0.75%, i.e. ≥0.25% margin over the floor) = the default 1.5% spacing is
+  wider than it needs to be — tighten toward σ and harvest more; `thin` (σ<0.75%)
+  = the vol-tracked spacing barely breaks even, degrading toward too-quiet. Same
+  colour, **opposite** recommendation — the detail spells out the exact fee margin
+  (`+0.42% over fee floor`), so read the number, not just the chip.
+- **regime** — efficiency ratio (|net move| ÷ summed minute moves) + net %/24h.
+  🟢 ER<0.30 choppy / mean-reverting (grid-favourable), 🟡 0.30–0.50 mixed, 🔴
+  ≥0.50 trending (the grid-downtrend-bleed early warning).
+- **flow imbalance (6h)** — aggressor buy vs sell volume; context only, excluded
+  from the verdict.
+- **harvest rate** — fraction of completed 1h buckets whose high–low range ≥1.5%
+  spacing; the most direct "is there anything to harvest" measure. 🟢 ≥25%, 🟡
+  ≥10%, 🔴 <10%. Measured against the fixed 1.5%, so it *understates* the
+  opportunity at a tighter adaptive spacing.
+
+The instructive combination is **vol-yellow-`firm` + harvest-green**: per-minute
+σ sits under 1.5% but hourly ranges still clear the spacing and the path is
+choppy — exactly where an *adaptive* grid earns its keep over a static one by
+tightening toward σ. Watch the vol number's drift inside the band (`firm → thin`),
+not just the colour: that is the early signal conditions are thinning toward
+stand-down **before** the colour flips red.
+
+One-shot report from the CLI:
+
+```bash
+/root/xrp_grid/venv/bin/python3 -m tape.conditions
+```
+
+## Dashboard performance (two clocks — keep heavy queries off the 2s path)
+
+The page polls `/api/status` every **2 s**, but the two heavy panels (Data
+Quality + Grid Conditions, ~24h window-function scans) are **cached on a 15 s
+TTL** (`_ANALYTICS_TTL_SEC` in `dashboard.py`) — they recompute ~4×/min, **not**
+30×/min, and are off the real-time path entirely. Measured on 2026-06-02 (8h of
+data): the hot per-poll work (feed freshness, throughput, market snapshot, five
+`COUNT(*)` totals) is **~0.06 ms**; the cached recompute is **quality ~86 ms +
+conditions ~9 ms**. So the live numbers you watch tick are sub-millisecond, and
+adding a metric to a cached panel cannot slow them.
+
+Two properties make this safe to extend:
+
+- **Cost is bounded by the 24h window + indexes, not total DB size.** Every
+  analytics query filters to the trailing window and those filters are
+  index-backed (`ix_trades_ts`, `ix_spread_ts`, the `ohlc_1m` / `rollup_bars`
+  PKs). As history accumulates the scans keep covering ~24h, so the cost rises
+  only until the window fills (~3× today's, then **plateaus**) — it does **not**
+  grow with months of data.
+- **WAL + a separate read-only dashboard connection** mean a slow analytics scan
+  can't block the collector's writes; worst case it slows only the dashboard's
+  own render, and the 15 s cache caps even that.
+
+**The rule when adding panels / metrics:**
+- ✅ Add to the **cached** path (`conditions.py` / `quality.py`) — windowed,
+  indexed, cheap. conditions at ~9 ms has large headroom.
+- ⚠️ Never add a query to the **hot** path (`build_status` outside the
+  `_analytics()` block) unless it is indexed / `LIMIT 1` / windowed. That is the
+  only way to actually slow the 2 s updates.
+- ⚠️ If `quality.report` ever gets heavy (it already dominates at ~86 ms and does
+  an N+1 loop over settled hourly buckets), raise `_ANALYTICS_TTL_SEC` (15→30 s) —
+  a 24h panel does not need 15 s freshness. Don't drop metrics; slow the cadence.
 
 ## Backups (durability, not capacity)
 
