@@ -287,10 +287,16 @@ _PAGE = """<!doctype html>
   .card::after{content:"";position:absolute;bottom:-2px;right:-2px;width:11px;height:11px;
     border-bottom:2px solid var(--magi-orange-bright);border-right:2px solid var(--magi-orange-bright)}
   .card.head{grid-column:1/-1;border-color:var(--magi-orange-bright)}
+  /* verdict-tinted glow on the headline card — copied from the MAGI agent cards */
+  .card.glow-green{box-shadow:0 0 14px rgba(0,255,102,.30)}
+  .card.glow-yellow{box-shadow:0 0 14px rgba(255,170,0,.35)}
+  .card.glow-red{box-shadow:0 0 16px rgba(255,51,51,.45)}
+  .card.glow-gray{box-shadow:0 0 10px rgba(102,85,34,.25)}
   .card h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange);
     margin:0 0 9px;border-left:4px solid var(--magi-orange);padding-left:8px}
-  .row{display:flex;justify-content:space-between;padding:2px 0}
-  .k{color:var(--magi-text-dim)}.v{color:var(--magi-orange-bright)}
+  .row{display:flex;justify-content:space-between;padding:2px 0;gap:10px}
+  .k{color:var(--magi-text-dim);white-space:nowrap}
+  .v{color:var(--magi-orange-bright);text-align:right;min-width:0;overflow-wrap:anywhere}
   .chip{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle}
   .green{background:var(--signal-green)}.yellow{background:var(--signal-amber)}
   .red{background:var(--signal-red)}.gray{background:#665522}
@@ -351,7 +357,7 @@ async function tick(){
             +'<span class="verdict v-'+qv+'">'+qv.toUpperCase()+'</span>'
             +'<span class="k">'+qsum+'</span></div>';
   const qgrid='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:0 18px">'+ql+'</div>';
-  g.push('<div class="card head"><h2>Data Quality</h2>'+qhead+qgrid+'</div>');
+  g.push('<div class="card head glow-'+qv+'"><h2>Data Quality</h2>'+qhead+qgrid+'</div>');
 
   // feeds
   let f=d.feeds||{}, fr='';
@@ -370,7 +376,7 @@ async function tick(){
   let mr=row('last price', m.last_price!=null?m.last_price:'—')
        +row('bid / ask',(m.bid!=null?m.bid:'—')+' / '+(m.ask!=null?m.ask:'—'))
        +row('spread', m.spread_bps!=null?m.spread_bps+' bps':'—');
-  const b=m.last_bar; if(b){mr+=row('last 1m bar', new Date(b.ts_begin).toLocaleTimeString())+row('  o/h/l/c', b.open+'/'+b.high+'/'+b.low+'/'+b.close);}
+  const b=m.last_bar; if(b){mr+=row('last 1m bar', new Date(b.ts_begin).toLocaleTimeString())+row('o/h/l/c', b.open+' / '+b.high+' / '+b.low+' / '+b.close);}
   g.push(card('Market snapshot', mr));
 
   // storage
