@@ -29,7 +29,13 @@ BAR_STALE_SEC    = 195     # >~3 missed closes = the bar feed has stalled
 PRICE_JUMP_PCT   = 0.05    # |Δ| between consecutive 1m closes >5% ≈ bad print / flash
 COVERAGE_RED     = 0.95    # <95% of expected 1m bars present in the captured span
 COVERAGE_YELLOW  = 0.995   # 95–99.5% = degraded
-ROLLUP_DRIFT_REL = 1e-4    # completed 1h bucket vol vs sum of its 1m vol; ~0 expected
+ROLLUP_DRIFT_REL = 1e-4    # settled 1h bucket vol vs sum of its 1m vol; ~0 expected
+# A just-closed bucket isn't reconcilable until the periodic rollup loop
+# (config.ROLLUP_EVERY_SECS) has re-run with the bucket's FINAL 1m bars — until
+# then the rollup row legitimately lags the live minute. Only reconcile buckets
+# settled at least two rollup cycles ago, so the check never false-positives on
+# that lag (which is exactly what tripped it the first time).
+ROLLUP_SETTLE_SEC = getattr(config, "ROLLUP_EVERY_SECS", 300) * 2
 BEACON_STALE_SEC = 30      # beacon cadence is 5s; >30s = collector not reporting
 
 _RANK = {"green": 0, "gray": 0, "yellow": 1, "red": 2}
@@ -127,10 +133,11 @@ def report(conn, now_ms=None, window_hours=WINDOW_HOURS):
                    "detail": f"{jumps} 1m jumps >{PRICE_JUMP_PCT*100:.0f}%",
                    "status": "green" if jumps == 0 else "yellow", "value": jumps})
 
-    # ---- rollup consistency: COMPLETED 1h buckets must reconcile to 1m vol ----
+    # ---- rollup consistency: SETTLED 1h buckets must reconcile to 1m vol ----
+    settle_cutoff = now - ROLLUP_SETTLE_SEC * 1000   # bucket must have closed before this
     rows = conn.execute("""SELECT ts_begin, volume FROM rollup_bars
         WHERE interval_min=60 AND ts_begin>=? AND ts_begin+3600000<=?
-        ORDER BY ts_begin""", (win, now)).fetchall()
+        ORDER BY ts_begin""", (win, settle_cutoff)).fetchall()
     max_rel, n, worst = 0.0, 0, None
     for ts_begin, vol in rows:
         base = scalar("SELECT COALESCE(SUM(volume),0) FROM ohlc_1m "
@@ -143,11 +150,11 @@ def report(conn, now_ms=None, window_hours=WINDOW_HOURS):
             max_rel, worst = rel, ts_begin
     if n == 0:
         checks.append({"key": "rollup", "label": "rollup consistency",
-                       "detail": "no completed 1h buckets yet", "status": "gray", "value": None})
+                       "detail": "no settled 1h buckets yet", "status": "gray", "value": None})
     else:
         st = "green" if max_rel <= ROLLUP_DRIFT_REL else "red"
         checks.append({"key": "rollup", "label": "rollup consistency",
-                       "detail": f"max drift {max_rel*100:.3f}% over {n} completed 1h",
+                       "detail": f"max drift {max_rel*100:.3f}% over {n} settled 1h",
                        "status": st, "value": round(max_rel * 100, 4)})
 
     # ---- collector beacon (is the writer even alive + connected?) ----
