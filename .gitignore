@@ -1,0 +1,12 @@
+# runtime artifacts — never committed (this repo is reference, not a deployment)
+__pycache__/
+*.pyc
+market_tape.db
+market_tape.db-wal
+market_tape.db-shm
+backups/
+
+# environments / secrets
+.venv/
+venv/
+.env

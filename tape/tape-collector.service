@@ -1,0 +1,22 @@
+[Unit]
+Description=Kraken Market Tape Collector (XRP/USD) — standalone, independent of MAGI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/xrp_grid
+# Reuses the existing venv only for the websocket-client dependency; the
+# tape package imports no MAGI code. Give it its own venv if you prefer
+# full isolation (only needs: pip install websocket-client).
+ExecStart=/root/xrp_grid/venv/bin/python3 -m tape.collector
+Restart=always
+RestartSec=10
+# Give the buffered writer time to flush its tail on stop.
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

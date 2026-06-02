@@ -1,0 +1,6 @@
+# The tape DB and its WAL/SHM sidecars are data, not code.
+market_tape.db
+market_tape.db-wal
+market_tape.db-shm
+backups/
+__pycache__/

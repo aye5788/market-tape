@@ -1,0 +1,266 @@
+"""
+tape/collector.py — the recorder. Wires the Kraken WS callbacks to the
+buffered TapeWriter and (optionally) runs the rollup loop in-process.
+
+Run:  python -m tape.collector
+Stop: SIGINT/SIGTERM (systemd) — flushes the writer tail before exit.
+
+This process imports ONLY this package + stdlib + websocket. No MAGI
+imports, writes only to tape/market_tape.db.
+"""
+import logging
+import re
+import signal
+import sqlite3
+import threading
+import time
+from datetime import datetime, timezone
+
+from tape import config
+from tape import notify
+from tape import rollup
+from tape import schema
+from tape.writer import TapeWriter
+from tape.ws_client import KrakenWebSocketClient
+
+log = logging.getLogger("tape.collector")
+
+# ---- timestamp parsing ----
+
+_FRAC = re.compile(r"\.(\d+)")
+
+
+def _iso_to_ms(s):
+    """RFC3339 (Kraken WS v2) -> epoch milliseconds. Tolerates 'Z' and
+    fractional seconds longer than microseconds (book/L3 use nanos);
+    Python's fromisoformat only accepts up to 6 fractional digits, so we
+    truncate. Returns None on anything unparseable."""
+    if not s:
+        return None
+    s = s.strip().replace("Z", "+00:00")
+    m = _FRAC.search(s)
+    if m and len(m.group(1)) > 6:
+        s = s[: m.start() + 7] + s[m.start() + 1 + len(m.group(1)):]
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+_SIDE = {"buy": 0, "sell": 1}
+_ORD_TYPE = {"market": 0, "limit": 1}
+
+
+class Collector:
+    def __init__(self):
+        self.writer = TapeWriter(
+            config.DB_PATH, schema.INSERTS,
+            flush_rows=config.FLUSH_ROWS,
+            flush_secs=config.FLUSH_SECS,
+            queue_max=config.QUEUE_MAX,
+        )
+        self.client = KrakenWebSocketClient(
+            symbols=config.SYMBOLS,
+            channels=config.CHANNELS,
+            ohlc_interval_min=config.OHLC_INTERVAL_MIN,
+            book_depth=config.BOOK_DEPTH,
+        )
+        self.client.on_ticker = self._on_ticker
+        self.client.on_trade = self._on_trade
+        self.client.on_ohlc_closed = self._on_ohlc_closed
+        self.client.on_book = self._on_book
+        self.client.on_state_change = self._on_state_change
+
+        self._stop = threading.Event()
+        self._rollup_thread = None
+        self._health_thread = None
+        self._started_at = None
+        # alert state — in-memory only, no MAGI db writes
+        self._unhealthy_since = None
+        self._down_alerted = False
+        self._last_drop_alert_count = 0
+
+    # ----- WS callbacks -> writer.put -----
+
+    def _on_ticker(self, e):
+        ts = _iso_to_ms(e.get("timestamp")) or _now_ms()
+        self.writer.put("spread", (
+            ts, e.get("bid"), e.get("bid_qty"),
+            e.get("ask"), e.get("ask_qty"), e.get("last"),
+        ))
+
+    def _on_trade(self, e):
+        tid = e.get("trade_id")
+        if tid is None:
+            return
+        ts = _iso_to_ms(e.get("timestamp")) or _now_ms()
+        self.writer.put("trades", (
+            int(tid), ts, e.get("price"), e.get("qty"),
+            _SIDE.get(e.get("side"), -1), _ORD_TYPE.get(e.get("ord_type"), -1),
+        ))
+
+    def _on_ohlc_closed(self, bar):
+        # Only the 1m base granularity is recorded raw; coarser is derived.
+        if int(bar.get("interval") or 0) != config.OHLC_INTERVAL_MIN:
+            return
+        ts = _iso_to_ms(bar.get("interval_begin"))
+        if ts is None:
+            return
+        self.writer.put("ohlc_1m", (
+            ts, bar.get("open"), bar.get("high"), bar.get("low"),
+            bar.get("close"), bar.get("volume"), bar.get("vwap"), bar.get("trades"),
+        ))
+
+    def _on_book(self, e, msg_type):
+        is_snap = 1 if msg_type == "snapshot" else 0
+        ts = _iso_to_ms(e.get("timestamp")) or _now_ms()
+        for lvl in (e.get("bids") or []):
+            self.writer.put("book_l2", (ts, 0, lvl.get("price"), lvl.get("qty"), is_snap))
+        for lvl in (e.get("asks") or []):
+            self.writer.put("book_l2", (ts, 1, lvl.get("price"), lvl.get("qty"), is_snap))
+
+    def _on_state_change(self, state, notes):
+        log.info("ws state -> %s (%s) reconnects_1h=%d",
+                 state, notes, self.client.reconnect_count_1h)
+
+    # ----- health beacon (read by the dashboard, a separate process) -----
+
+    def _write_health(self, conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO collector_health "
+            "(id, ts, ws_state, last_msg_age_sec, reconnects_1h, "
+            " rows_written, rows_dropped, started_at) "
+            "VALUES (1,?,?,?,?,?,?,?)",
+            (_now_ms(), self.client.state, self.client.last_message_age_sec,
+             self.client.reconnect_count_1h, self.writer.written,
+             self.writer.dropped, self._started_at),
+        )
+        conn.commit()
+
+    def _health_loop(self):
+        conn = sqlite3.connect(config.DB_PATH)
+        conn.execute("PRAGMA busy_timeout=10000")
+        try:
+            self._write_health(conn)  # write once immediately
+            while not self._stop.wait(config.HEALTH_EVERY_SECS):
+                try:
+                    self._write_health(conn)
+                except Exception as e:
+                    log.warning("health write failed: %r", e)
+                try:
+                    self._check_alerts()
+                except Exception as e:
+                    log.warning("alert check failed: %r", e)
+        finally:
+            conn.close()
+
+    def _check_alerts(self):
+        """Edge-triggered phone alerts via the shared ntfy topic. Fires once
+        per outage (not every beat), and a recovery note when it clears."""
+        if not config.ALERT_ENABLED:
+            return
+        now = time.time()
+        st = self.client.state
+        age = self.client.last_message_age_sec
+        unhealthy = (st != "connected") or (age is None) or (age > config.ALERT_STALE_SECS)
+
+        if unhealthy:
+            if self._unhealthy_since is None:
+                self._unhealthy_since = now
+            down_for = now - self._unhealthy_since
+            if down_for >= config.ALERT_DOWN_GRACE_SECS and not self._down_alerted:
+                age_str = f"{int(age)}s" if age is not None else "n/a"
+                notify.send(
+                    "Tape collector: FEED DOWN",
+                    f"[CRITICAL] ws={st} last_data={age_str} "
+                    f"down~{int(down_for)}s -> open dashboard",
+                    "critical",
+                )
+                self._down_alerted = True
+                log.error("ALERT: feed down (ws=%s age=%s) — pushed", st, age)
+        else:
+            if self._down_alerted:
+                notify.send(
+                    "Tape collector: RECOVERED",
+                    "[OK] ws connected, data flowing again",
+                    "warning",
+                )
+                log.info("ALERT: feed recovered — pushed")
+            self._unhealthy_since = None
+            self._down_alerted = False
+
+        dropped = self.writer.dropped
+        if dropped - self._last_drop_alert_count >= config.ALERT_DROP_THRESHOLD:
+            notify.send(
+                "Tape collector: DROPPING ROWS",
+                f"[CRITICAL] writer dropped {dropped} rows (queue full)",
+                "critical",
+            )
+            self._last_drop_alert_count = dropped
+            log.error("ALERT: writer dropping (%d) — pushed", dropped)
+
+    # ----- rollup loop (optional, in-process) -----
+
+    def _rollup_loop(self):
+        while not self._stop.wait(config.ROLLUP_EVERY_SECS):
+            try:
+                rollup.run_once(
+                    config.DB_PATH, config.ROLLUP_INTERVALS_MIN,
+                    config.ROLLUP_LOOKBACK_HOURS, config.RAW_RETENTION_DAYS,
+                )
+            except Exception as e:
+                log.exception("rollup run failed: %s", e)
+
+    # ----- lifecycle -----
+
+    def start(self):
+        schema.init_db(config.DB_PATH)
+        self._started_at = _now_ms()
+        self.writer.start()
+        self.client.start()
+        self._health_thread = threading.Thread(
+            target=self._health_loop, name="tape_health", daemon=True)
+        self._health_thread.start()
+        if config.ROLLUP_IN_PROCESS:
+            self._rollup_thread = threading.Thread(
+                target=self._rollup_loop, name="tape_rollup", daemon=True)
+            self._rollup_thread.start()
+            log.info("in-process rollup loop started (every %ds)", config.ROLLUP_EVERY_SECS)
+        log.info("collector running — channels=%s symbol=%s db=%s",
+                 config.CHANNELS, config.SYMBOL, config.DB_PATH)
+
+    def run_forever(self):
+        self.start()
+
+        def _handle_signal(signum, frame):
+            log.info("signal %s received — shutting down", signum)
+            self._stop.set()
+
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+
+        while not self._stop.is_set():
+            self._stop.wait(1.0)
+
+        self.client.shutdown()
+        self.writer.stop()
+        log.info("collector stopped cleanly")
+
+
+def main():
+    logging.basicConfig(
+        level=getattr(logging, config.LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    )
+    Collector().run_forever()
+
+
+if __name__ == "__main__":
+    main()

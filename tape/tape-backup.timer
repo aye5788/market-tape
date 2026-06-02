@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly market-tape backup to GCS
+
+[Timer]
+OnCalendar=hourly
+Persistent=true              # run on boot if an hourly tick was missed while down
+RandomizedDelaySec=120       # avoid firing exactly on the hour
+
+[Install]
+WantedBy=timers.target
