@@ -189,6 +189,29 @@ Fires (from the health loop, `config.ALERT_*`):
 Test by hand: `python -m tape.collector` is live; to fire a test push:
 `python -c "from tape import notify; notify.send('Tape: test','[TEST] ignore','warning')"`
 
+## Self-assessment & containment (flag-only — never mutates data)
+
+The collector self-grades data quality every `SELFCHECK_EVERY_SECS` (60 s) in its
+health loop. Design philosophy (operator's): **err on caution — accept the small,
+inevitable loss of a blip, and put the effort into containing a *sustained* or
+systemic problem, not aggressively patching every gap.** So:
+
+- **Gaps are FLAGGED ONLY**, never backfilled. A missing 1m bar older than
+  `GAP_SETTLE_SECS` (so a reconnect's re-sent bars aren't false-flagged) is
+  logged once as a `gap` event ("1m gap: N bar(s) missing HH:MM–HH:MM, flagged,
+  not backfilled"). The first pass seeds existing gaps silently. No writes.
+- **Only a SUSTAINED red verdict escalates** — quality red for ≥ `DQ_SUSTAINED_SECS`
+  (180 s), i.e. not a single blip. On escalation: a distinct **critical** ntfy
+  push, a `degraded_start` event marking the window, and `auto_actions_frozen`
+  is set — the containment stance is to do *less*, not more, when something is
+  systemically wrong (a bad source must not be trusted to "fix" itself). Recovery
+  emits `degraded_end` and unfreezes.
+- **Nothing here mutates or deletes collected data.** Auto-backfill from REST is
+  deliberately *not* built yet — gaps are surfaced, and turning on real recovery
+  is a future, opt-in switch gated by `auto_actions_frozen`.
+
+All of this surfaces in the dashboard **Events** panel.
+
 ## Dead-man's-switch (catches total death)
 
 The ntfy alerts above are emitted *by the collector* — so they can't fire if the
