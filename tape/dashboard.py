@@ -295,6 +295,15 @@ def build_status():
             bk["status"], bk["error"] = "gray", str(e)
         out["backup"] = bk
 
+        # ---- recent events (alerts + ws state changes) ----
+        try:
+            ev = c.execute("SELECT ts, severity, category, message FROM events "
+                           "ORDER BY ts DESC LIMIT 12").fetchall()
+            out["events"] = [{"ts": r[0], "severity": r[1], "category": r[2],
+                              "message": r[3]} for r in ev]
+        except Exception:
+            out["events"] = []
+
         # ---- data quality (the control-panel headline) ----
         try:
             out["quality"] = quality.report(c, now)
@@ -355,7 +364,8 @@ _PAGE = """<!doctype html>
     animation:glow-red-pulse 1.4s ease-in-out infinite alternate}
   .card.glow-gray{}
   @keyframes glow-red-pulse{from{box-shadow:0 0 6px rgba(255,51,51,.4)}to{box-shadow:0 0 14px rgba(255,51,51,.85)}}
-  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange-bright);
+  .card h2{font-family:"Helvetica Neue","Helvetica","Arial",sans-serif;font-weight:700;
+    font-size:11px;text-transform:uppercase;letter-spacing:3px;color:var(--magi-orange-bright);
     margin:0 0 9px;border-left:4px solid var(--magi-orange);padding-left:8px}
   .row{display:flex;justify-content:space-between;padding:2px 0;gap:10px}
   .k{color:var(--magi-text-dim);white-space:nowrap}
@@ -370,8 +380,8 @@ _PAGE = """<!doctype html>
   .qitem{padding:7px 11px;border-left:2px solid var(--magi-orange);background:rgba(255,153,0,.04)}
   .qlabel{color:var(--magi-orange-bright);white-space:nowrap}
   .qdetail{color:var(--magi-text-dim);font-size:11px;margin-top:3px;overflow-wrap:anywhere}
-  .verdict{font-size:26px;letter-spacing:6px;font-weight:bold;text-transform:uppercase;
-    font-family:"Arial Black","Helvetica",sans-serif}
+  .verdict{font-size:34px;letter-spacing:6px;text-transform:uppercase;line-height:1;
+    font-family:"VT323","Courier New",monospace}
   .v-green{color:var(--signal-green);text-shadow:0 0 12px rgba(0,255,102,.4)}
   .v-yellow{color:var(--signal-amber);text-shadow:0 0 12px rgba(255,170,0,.4)}
   .v-red{color:var(--signal-red);text-shadow:0 0 12px rgba(255,51,51,.4)}
@@ -474,6 +484,17 @@ async function tick(){
   const keys=Object.keys(rb); if(!keys.length) rr=row('status','no rollups yet');
   for(const k of keys.sort((a,b)=>a-b)){const x=rb[k];rr+=row(names[k]||(k+'m'),(x.count??0)+' bars · '+fmtAge(x.age_sec)+' old');}
   g.push(card('Rollups', rr));
+
+  // events — alert + ws-state history
+  const ev=d.events||[];
+  const sevChip=s=>s==='critical'?'red':(s==='warning'||s==='warn')?'yellow':'gray';
+  let er='';
+  for(const e of ev){
+    const t=new Date(e.ts).toLocaleTimeString();
+    er+='<div class="row"><span class="k">'+chip(sevChip(e.severity))+t+'</span><span class="v">'+(e.message||e.category||'')+'</span></div>';
+  }
+  if(!ev.length) er=row('status','no events yet');
+  g.push(card('Events', er));
 
   $('grid').innerHTML=g.join('');
 }

@@ -56,6 +56,15 @@ CREATE TABLE IF NOT EXISTS collector_health (
     started_at INTEGER
 );
 
+-- Append-only event log: alerts (feed down/recovered/dropping) and ws state
+-- changes (connect/disconnect/reconnect). Powers the dashboard Events panel —
+-- centralizes the history that was otherwise only an in-memory/ntfy ephemeral.
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER, severity TEXT, category TEXT, message TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts);
+
 -- Derived, PERMANENT rollups: coarser OHLCV (+vwap/trades) from ohlc_1m,
 -- plus order-flow (buy/sell vol, trade count) and mean spread from the
 -- raw tape. (interval_min, ts_begin) PK makes the rollup idempotent.

@@ -87,6 +87,10 @@ class Collector:
         self._down_alerted = False
         self._last_drop_alert_count = 0
         self._last_heartbeat = 0.0   # dead-man's-switch ping cadence
+        # event log queue — appended from any thread (ws + health), drained and
+        # written by the single health-loop connection (events stay single-writer)
+        self._event_lock = threading.Lock()
+        self._events = []
 
     # ----- WS callbacks -> writer.put -----
 
@@ -130,6 +134,27 @@ class Collector:
     def _on_state_change(self, state, notes):
         log.info("ws state -> %s (%s) reconnects_1h=%d",
                  state, notes, self.client.reconnect_count_1h)
+        sev = "info" if state == "connected" else "warning"
+        self._emit_event(sev, "ws_state", f"ws {state}" + (f": {notes}" if notes else ""))
+
+    # ----- event log (alerts + ws state changes) -----
+
+    def _emit_event(self, severity, category, message):
+        """Queue an event for the health loop to persist. Thread-safe; bounded
+        so a stalled drain can't grow it without limit."""
+        with self._event_lock:
+            self._events.append((_now_ms(), severity, category, (message or "")[:300]))
+            if len(self._events) > 500:
+                self._events = self._events[-500:]
+
+    def _drain_events(self, conn):
+        with self._event_lock:
+            batch, self._events = self._events, []
+        if batch:
+            conn.executemany(
+                "INSERT INTO events (ts, severity, category, message) VALUES (?,?,?,?)",
+                batch)
+            conn.commit()
 
     # ----- health beacon (read by the dashboard, a separate process) -----
 
@@ -164,7 +189,15 @@ class Collector:
                     self._maybe_heartbeat()
                 except Exception as e:
                     log.debug("heartbeat failed: %r", e)
+                try:
+                    self._drain_events(conn)
+                except Exception as e:
+                    log.warning("event drain failed: %r", e)
         finally:
+            try:
+                self._drain_events(conn)   # flush tail on shutdown
+            except Exception:
+                pass
             conn.close()
 
     def _maybe_heartbeat(self):
@@ -200,6 +233,8 @@ class Collector:
                     "critical",
                 )
                 self._down_alerted = True
+                self._emit_event("critical", "feed_down",
+                                 f"feed down: ws={st} last_data={age_str} for ~{int(down_for)}s")
                 log.error("ALERT: feed down (ws=%s age=%s) — pushed", st, age)
         else:
             if self._down_alerted:
@@ -209,6 +244,7 @@ class Collector:
                     "warning",
                 )
                 log.info("ALERT: feed recovered — pushed")
+                self._emit_event("warning", "recovered", "feed recovered — data flowing again")
             self._unhealthy_since = None
             self._down_alerted = False
 
@@ -220,6 +256,7 @@ class Collector:
                 "critical",
             )
             self._last_drop_alert_count = dropped
+            self._emit_event("critical", "dropping", f"writer dropped {dropped} rows (queue full)")
             log.error("ALERT: writer dropping (%d) — pushed", dropped)
 
     # ----- rollup loop (optional, in-process) -----
