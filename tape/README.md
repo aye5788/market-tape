@@ -144,6 +144,11 @@ the tape is backed up off-box.
   fires on boot). The GCS bucket has a lifecycle rule deleting snapshots >30 d.
 - Uses the already-configured `gsutil` (project `xrp-grid-brain-monitor`) — no
   new account or service.
+- Each run writes `tape/backups/.last_backup.json` (GCS-confirmed timestamp,
+  size, upload-ok, local copy count). The dashboard's **Backup & durability**
+  panel reads that file — so it shows real upload status with no per-poll
+  network call, and goes red if the last backup is overdue (>150 min vs the
+  hourly timer) or the GCS upload failed.
 
 Run a backup by hand: `python -m tape.backup`
 

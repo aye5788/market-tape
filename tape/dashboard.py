@@ -8,6 +8,7 @@ No MAGI imports. The page polls /api/status every 2s.
 
 Run:  python -m tape.dashboard   (or via the repurposed root dashboard.py)
 """
+import json
 import os
 import sqlite3
 import time
@@ -105,6 +106,11 @@ _FEED_THRESH = {
     "spread": (90, 600),
     "ohlc_1m": (150, 360),
 }
+
+# Backup freshness verdict — anchored to the hourly tape-backup.timer.
+# <90m = fresh; 90–150m = a tick was likely missed; >150m = overdue/stalled.
+_BACKUP_WARN_SEC = 90 * 60
+_BACKUP_RED_SEC = 150 * 60
 
 
 def _conn():
@@ -239,6 +245,44 @@ def build_status():
         except Exception:
             pass
         out["rollup"] = rollup
+
+        # ---- backup & durability (reads backup.py's status file; no per-poll
+        #      network call — the file records GCS-confirmed success) ----
+        bk = {"bucket": f"{config.BACKUP_BUCKET}/{config.BACKUP_GCS_PREFIX}",
+              "keep": config.BACKUP_LOCAL_KEEP}
+        try:
+            sf = os.path.join(config.BACKUP_LOCAL_DIR, ".last_backup.json")
+            if os.path.exists(sf):
+                with open(sf) as fh:
+                    st = json.load(fh)
+                bk.update({"last_ts": st.get("ts_ms"), "age_sec": _age(now, st.get("ts_ms")),
+                           "bytes": st.get("bytes"), "gcs_ok": st.get("gcs_ok"),
+                           "local_count": st.get("local_count"), "name": st.get("name"),
+                           "error": st.get("error")})
+            else:
+                # fallback before the first run after this upgrade: scan the dir
+                d = config.BACKUP_LOCAL_DIR
+                files = sorted(os.path.join(d, f) for f in os.listdir(d)
+                               if f.startswith("market_tape_") and f.endswith(".db.gz")) \
+                    if os.path.isdir(d) else []
+                if files:
+                    newest = files[-1]
+                    lt = int(os.path.getmtime(newest) * 1000)
+                    bk.update({"last_ts": lt, "age_sec": _age(now, lt),
+                               "bytes": os.path.getsize(newest), "gcs_ok": None,
+                               "local_count": len(files), "name": os.path.basename(newest)})
+                else:
+                    bk["last_ts"] = None
+            age = bk.get("age_sec")
+            if bk.get("last_ts") is None or bk.get("gcs_ok") is False or age is None or age > _BACKUP_RED_SEC:
+                bk["status"] = "red"
+            elif age > _BACKUP_WARN_SEC:
+                bk["status"] = "yellow"
+            else:
+                bk["status"] = "green"
+        except Exception as e:
+            bk["status"], bk["error"] = "gray", str(e)
+        out["backup"] = bk
 
         # ---- data quality (the control-panel headline) ----
         try:
@@ -397,6 +441,18 @@ async function tick(){
   for(const k of ['trades','spread','ohlc_1m','book_l2','rollup_bars']) sr+=row('  '+k,(tb[k]??0).toLocaleString());
   if(s.oldest_trade_ts) sr+=row('oldest trade', new Date(s.oldest_trade_ts).toLocaleString());
   g.push(card('Storage', sr));
+
+  // backup & durability
+  const bk=d.backup||{};
+  const gcs = bk.gcs_ok===true?'✓ uploaded':(bk.gcs_ok===false?'✗ FAILED':'— local only');
+  const stamp = bk.name?(' · '+bk.name.replace('market_tape_','').replace('.db.gz','')):'';
+  let kr=row(chip(bk.status||'gray')+'last backup', bk.age_sec!=null?(fmtAge(bk.age_sec)+' ago'):'none yet')
+       +row('size', bk.bytes!=null?((bk.bytes/1e6).toFixed(2)+' MB'+stamp):'—')
+       +row('off-box (GCS)', gcs)
+       +row('local copies', (bk.local_count!=null?bk.local_count:'—')+' / '+(bk.keep??'—')+' kept')
+       +row('bucket', bk.bucket||'—');
+  if(bk.error) kr+=row('error', bk.error);
+  g.push(card('Backup & durability', kr));
 
   // rollup
   const rb=d.rollup||{}; let rr=''; const names={5:'5m',60:'1h',360:'6h',1440:'1d'};

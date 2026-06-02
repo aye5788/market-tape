@@ -18,17 +18,47 @@ cover corruption / accidental deletion with an instant restore.
 Standalone:  python -m tape.backup
 """
 import gzip
+import json
 import logging
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 from tape import config
 
 log = logging.getLogger("tape.backup")
+
+# The dashboard reads this (in BACKUP_LOCAL_DIR) for the Backup & Durability
+# panel — so it shows GCS-CONFIRMED status without a per-poll network call.
+STATUS_FILE = ".last_backup.json"
+
+
+def _write_status(name, gz_path, gcs_ok, remote, error=None):
+    """Record the outcome of this run for the dashboard. Best-effort."""
+    try:
+        d = config.BACKUP_LOCAL_DIR
+        local = [f for f in os.listdir(d)
+                 if f.startswith("market_tape_") and f.endswith(".db.gz")]
+        status = {
+            "ts_ms": int(time.time() * 1000),
+            "name": name,
+            "bytes": os.path.getsize(gz_path) if os.path.exists(gz_path) else None,
+            "gcs_ok": gcs_ok,
+            "remote": remote,
+            "local_count": len(local),
+        }
+        if error:
+            status["error"] = error[:200]
+        tmp = os.path.join(d, STATUS_FILE + ".tmp")
+        with open(tmp, "w") as fh:
+            json.dump(status, fh)
+        os.replace(tmp, os.path.join(d, STATUS_FILE))
+    except Exception as e:
+        log.warning("status write failed: %r", e)
 
 
 def _gsutil():
@@ -95,11 +125,13 @@ def run_once():
     if rc.returncode != 0:
         log.error("gsutil upload failed (rc=%d): %s", rc.returncode, rc.stderr.strip())
         _prune_local()          # local snapshot still kept; surface failure to systemd
+        _write_status(name, gz_path, False, remote, error=rc.stderr.strip())
         sys.exit(1)
     log.info("uploaded -> %s", remote)
 
     # 4) prune local rolling copies
     _prune_local()
+    _write_status(name, gz_path, True, remote)
 
 
 def main():
