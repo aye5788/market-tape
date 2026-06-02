@@ -98,8 +98,11 @@ shows "COLLECTOR NOT REPORTING" until the collector writes health beacons.
 Panels: **Data Quality** (the full-width control-panel headline — see below),
 process health (ws state / reconnects / rows written-dropped, from the
 `collector_health` beacon), feed freshness, throughput + trades/min sparkline,
-market snapshot, storage usage, rollup status, **Backup & durability**, and
-**Events** (alert + ws-state history from the `events` table). Page polls
+market snapshot, storage usage, rollup status, **Backup & durability**,
+**Events** (alert + ws-state history from the `events` table), and **Grid
+Conditions** (advisory market-analytics: realized vol → suggested spacing,
+regime, flow imbalance, harvest rate — `tape/conditions.py`, enforces nothing).
+Page polls
 `/api/status` every 2s. Styled in the MAGI terminal palette (amber/orange on
 black, Michroma title + VT323 verdict + Courier-New body — same fonts the
 archived MAGI dashboard loads) so it reads as the same control surface.
