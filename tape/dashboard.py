@@ -17,6 +17,7 @@ from datetime import timedelta
 from flask import (Flask, jsonify, redirect, render_template_string,
                    request, session, url_for)
 
+from tape import conditions
 from tape import config
 from tape import quality
 
@@ -310,6 +311,13 @@ def build_status():
         except Exception as e:
             out["quality"] = {"verdict": "gray", "checks": [],
                               "error": str(e), "window_hours": quality.WINDOW_HOURS}
+
+        # ---- grid conditions (advisory market-analytics) ----
+        try:
+            out["conditions"] = conditions.report(c, now)
+        except Exception as e:
+            out["conditions"] = {"verdict": "gray", "metrics": [], "error": str(e),
+                                  "window_hours": conditions.WINDOW_HOURS}
         return out
     finally:
         c.close()
@@ -438,6 +446,16 @@ async function tick(){
             +'<span class="verdict v-'+qv+'">'+qv.toUpperCase()+'</span>'
             +'<span class="k">'+qsum+'</span></div>';
   g.push('<div class="card head glow-'+qv+'"><h2>Data Quality</h2>'+qhead+'<div class="qgrid">'+ql+'</div></div>');
+
+  // grid conditions — advisory market-analytics (full-width, no glow)
+  const gc=d.conditions||{}, gm=gc.metrics||[], gv=(gc.verdict||'gray');
+  let gi='';
+  for(const m of gm){ gi+='<div class="qitem"><div class="qlabel">'+chip(m.status||'gray')+m.label+'</div><div class="qdetail">'+(m.detail||'—')+'</div></div>'; }
+  if(!gm.length) gi='<div class="qitem"><div class="qdetail">'+(gc.error||'warming up')+'</div></div>';
+  const gch='<div class="row" style="align-items:center;margin-bottom:4px">'
+          +'<span class="verdict v-'+gv+'" style="font-size:22px">'+(gv==='gray'?'—':gv.toUpperCase())+'</span>'
+          +'<span class="k">grid favorability · advisory, enforces nothing · '+(gc.window_hours||24)+'h</span></div>';
+  g.push('<div class="card head"><h2>Grid Conditions</h2>'+gch+'<div class="qgrid">'+gi+'</div></div>');
 
   // feeds
   let f=d.feeds||{}, fr='';
