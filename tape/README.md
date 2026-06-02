@@ -184,6 +184,25 @@ Fires (from the health loop, `config.ALERT_*`):
 Test by hand: `python -m tape.collector` is live; to fire a test push:
 `python -c "from tape import notify; notify.send('Tape: test','[TEST] ignore','warning')"`
 
+## Dead-man's-switch (catches total death)
+
+The ntfy alerts above are emitted *by the collector* — so they can't fire if the
+collector process or the whole box dies. That blind spot is closed by an
+**external** heartbeat: the collector pings `HEALTHCHECK_PING_URL` every
+`HEALTHCHECK_EVERY_SECS` (60 s) while it's alive (`notify.heartbeat()`, same
+env-driven fail-silent pattern as the ntfy push). An external monitor pages you
+when the pings **stop**. The ping is *unconditional* (it proves the process
+runs; feed problems are alerted separately), so the daily Kraken reconnect never
+trips it. Unset URL = silent no-op, so it's inert until you set one up.
+
+Setup (~2 min, free, no card — [healthchecks.io](https://healthchecks.io)):
+1. Create a free account → **Add Check**. Set Period ≈ 2 min, **Grace ≈ 5 min**
+   (well above any brief reconnect). Add a notification (email, or point it at
+   the same ntfy topic).
+2. Copy the check's ping URL (`https://hc-ping.com/<uuid>`).
+3. Put `HEALTHCHECK_PING_URL=https://hc-ping.com/<uuid>` in `.env` and
+   `systemctl restart tape-collector`. Within a minute the check goes green.
+
 ## Extending later
 
 - **L2 book:** add `"book"` to `CHANNELS`. Already wired; just heavier.

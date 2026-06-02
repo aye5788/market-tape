@@ -57,3 +57,24 @@ def send(title, body, severity="critical"):
     except Exception as e:
         log.warning("ntfy send failed: %r", e)
         return False
+
+
+def heartbeat():
+    """Ping the external dead-man's-switch at HEALTHCHECK_PING_URL (.env).
+
+    Same env-driven, fail-silent pattern as send(): a GET the collector fires
+    while it's alive. An external monitor (healthchecks.io free tier) pages the
+    operator when the pings STOP — catching total collector/box death, which the
+    in-process ntfy alert cannot. No-op (returns False) if the URL is unset, so
+    this stays inert until a check is created. Never raises, never blocks long."""
+    if load_dotenv:
+        load_dotenv("/root/xrp_grid/.env", override=False)
+    url = (os.environ.get("HEALTHCHECK_PING_URL") or "").strip()
+    if not url:
+        return False
+    try:
+        r = requests.get(url, timeout=_TIMEOUT_SEC)
+        return 200 <= r.status_code < 300
+    except Exception as e:
+        log.debug("heartbeat ping failed: %r", e)
+        return False

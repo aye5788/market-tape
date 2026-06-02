@@ -67,6 +67,16 @@ ALERT_STALE_SECS = 30            # ws not connected / no data this long = unheal
 ALERT_DOWN_GRACE_SECS = 90       # ...sustained this long before firing a critical
 ALERT_DROP_THRESHOLD = 1000      # writer-dropped rows jump this much = critical
 
+# --- dead-man's-switch (external watchdog; reuses .env like the ntfy alerts) ---
+# If HEALTHCHECK_PING_URL is set in .env, the collector pings it every
+# HEALTHCHECK_EVERY_SECS while the PROCESS is alive. An EXTERNAL monitor (e.g.
+# healthchecks.io free tier) pages you when the pings STOP — which covers total
+# collector/box death, the one failure the in-process ntfy alert can't catch.
+# Unset URL = silent no-op, so this stays inert until you create the check.
+# Set the monitor's grace WELL above a few-second blip so the daily Kraken
+# reconnect never trips it.
+HEALTHCHECK_EVERY_SECS = 60
+
 # --- health beacon / dashboard ---
 HEALTH_EVERY_SECS = 5            # collector writes a liveness row this often
 DASHBOARD_HOST = "0.0.0.0"

@@ -86,6 +86,7 @@ class Collector:
         self._unhealthy_since = None
         self._down_alerted = False
         self._last_drop_alert_count = 0
+        self._last_heartbeat = 0.0   # dead-man's-switch ping cadence
 
     # ----- WS callbacks -> writer.put -----
 
@@ -149,6 +150,7 @@ class Collector:
         conn.execute("PRAGMA busy_timeout=10000")
         try:
             self._write_health(conn)  # write once immediately
+            self._maybe_heartbeat()
             while not self._stop.wait(config.HEALTH_EVERY_SECS):
                 try:
                     self._write_health(conn)
@@ -158,8 +160,22 @@ class Collector:
                     self._check_alerts()
                 except Exception as e:
                     log.warning("alert check failed: %r", e)
+                try:
+                    self._maybe_heartbeat()
+                except Exception as e:
+                    log.debug("heartbeat failed: %r", e)
         finally:
             conn.close()
+
+    def _maybe_heartbeat(self):
+        """Ping the external dead-man's-switch on a fixed cadence while the
+        process is alive. UNCONDITIONAL: it proves the PROCESS is running (feed
+        problems are alerted separately via _check_alerts), so the daily Kraken
+        reconnect doesn't suppress it. No-op until HEALTHCHECK_PING_URL is set."""
+        now = time.time()
+        if now - self._last_heartbeat >= config.HEALTHCHECK_EVERY_SECS:
+            notify.heartbeat()
+            self._last_heartbeat = now
 
     def _check_alerts(self):
         """Edge-triggered phone alerts via the shared ntfy topic. Fires once

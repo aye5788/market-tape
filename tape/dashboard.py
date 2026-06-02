@@ -311,8 +311,8 @@ _PAGE = """<!doctype html>
   /* MAGI terminal palette — copied from the archived MAGI dashboard */
   :root{
     --bg:#000000; --panel-bg:#0a0a0a;
-    --magi-cyan:#00d4d4; --magi-orange:#ff6600; --magi-orange-bright:#ff9933;
-    --magi-text:#ff9933; --magi-text-dim:#cc7722; --magi-grid:#221100;
+    --magi-cyan:#00d4d4; --magi-orange:#ff6600; --magi-orange-bright:#ffc266;
+    --magi-text:#ffb157; --magi-text-dim:#e8a05a; --magi-grid:#221100;
     --signal-green:#00ff66; --signal-amber:#ffaa00; --signal-red:#ff3333;
   }
   body{background:var(--bg);
