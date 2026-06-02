@@ -67,6 +67,15 @@ ALERT_STALE_SECS = 30            # ws not connected / no data this long = unheal
 ALERT_DOWN_GRACE_SECS = 90       # ...sustained this long before firing a critical
 ALERT_DROP_THRESHOLD = 1000      # writer-dropped rows jump this much = critical
 
+# --- self-assessment / containment (flag-only; NEVER mutates collected data) ---
+# The collector periodically self-grades data quality. Philosophy: auto-act only
+# on small benign gaps; for anything SUSTAINED, stop + flag + escalate, don't
+# overcorrect. Gaps are FLAGGED ONLY (logged as events) — no backfill yet.
+SELFCHECK_EVERY_SECS = 60        # how often the collector self-grades quality
+DQ_SUSTAINED_SECS = 180          # quality RED this long = sustained (not a blip) -> escalate
+GAP_SETTLE_SECS = 180            # only flag 1m gaps older than this (lets reconnects re-send)
+GAP_LOOKBACK_HOURS = 6           # recent window scanned for new gaps each self-check
+
 # --- dead-man's-switch (external watchdog; reuses .env like the ntfy alerts) ---
 # If HEALTHCHECK_PING_URL is set in .env, the collector pings it every
 # HEALTHCHECK_EVERY_SECS while the PROCESS is alive. An EXTERNAL monitor (e.g.

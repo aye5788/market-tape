@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from tape import config
 from tape import notify
+from tape import quality
 from tape import rollup
 from tape import schema
 from tape.writer import TapeWriter
@@ -91,6 +92,13 @@ class Collector:
         # written by the single health-loop connection (events stay single-writer)
         self._event_lock = threading.Lock()
         self._events = []
+        # self-assessment / containment state (flag-only, never mutates data)
+        self._last_selfcheck = 0.0
+        self._selfcheck_seeded = False     # first pass seeds existing gaps silently
+        self._logged_gaps = set()
+        self._dq_red_since = None
+        self._dq_escalated = False
+        self.auto_actions_frozen = False   # set True on sustained problem (gates future backfill)
 
     # ----- WS callbacks -> writer.put -----
 
@@ -156,6 +164,86 @@ class Collector:
                 batch)
             conn.commit()
 
+    # ----- self-assessment / containment (flag-only, NEVER mutates data) -----
+
+    def _detect_gaps(self, conn, now):
+        """Find missing 1m bars in the recent SETTLED window (older than
+        GAP_SETTLE_SECS, so a reconnect's re-sent bars aren't false-flagged).
+        Returns [(gap_start_ms, missing_count)]. Read-only."""
+        settle = now - config.GAP_SETTLE_SECS * 1000
+        win = now - config.GAP_LOOKBACK_HOURS * 3_600_000
+        rows = [r[0] for r in conn.execute(
+            "SELECT ts_begin FROM ohlc_1m WHERE ts_begin>=? AND ts_begin<=? ORDER BY ts_begin",
+            (win, settle))]
+        gaps = []
+        for i in range(1, len(rows)):
+            missing = (rows[i] - rows[i - 1]) // 60_000 - 1
+            if missing > 0:
+                gaps.append((rows[i - 1] + 60_000, int(missing)))
+        return gaps
+
+    def _self_assess(self, conn):
+        """Periodic data-quality self-grade. FLAG-ONLY containment — never
+        mutates collected data. Logs newly-detected 1m gaps as events, and
+        escalates ONLY a SUSTAINED red verdict (not a single blip): a distinct
+        critical alert + a degraded-window marker + freezing auto-actions.
+        Recovery clears it. The philosophy: small benign gaps are tolerated and
+        merely flagged; a sustained/systemic problem makes us LESS aggressive
+        (freeze + escalate), not more."""
+        now = _now_ms()
+
+        # --- flag-only gap detection (no backfill) ---
+        gaps = self._detect_gaps(conn, now)
+        if not self._selfcheck_seeded:
+            # first pass: adopt existing gaps silently so we only flag NEW ones
+            self._logged_gaps.update(g[0] for g in gaps)
+            self._selfcheck_seeded = True
+        else:
+            for gap_start, missing in gaps:
+                if gap_start in self._logged_gaps:
+                    continue
+                self._logged_gaps.add(gap_start)
+                t0 = time.strftime("%H:%M", time.gmtime(gap_start / 1000))
+                t1 = time.strftime("%H:%M", time.gmtime((gap_start + missing * 60_000) / 1000))
+                self._emit_event("warning", "gap",
+                                 f"1m gap: {missing} bar(s) missing {t0}-{t1} UTC "
+                                 f"(flagged, not backfilled)")
+        if len(self._logged_gaps) > 1000:
+            self._logged_gaps = set(sorted(self._logged_gaps)[-1000:])
+
+        # --- sustained-problem detection on the quality verdict ---
+        try:
+            rep = quality.report(conn, now)
+        except Exception as e:
+            log.warning("self-assess quality report failed: %r", e)
+            return
+        if rep.get("verdict") == "red":
+            if self._dq_red_since is None:
+                self._dq_red_since = time.time()
+            red_for = time.time() - self._dq_red_since
+            if red_for >= config.DQ_SUSTAINED_SECS and not self._dq_escalated:
+                failing = ", ".join(c["label"] for c in rep.get("checks", [])
+                                    if c.get("status") == "red") or "unknown"
+                self.auto_actions_frozen = True
+                self._dq_escalated = True
+                self._emit_event("critical", "degraded_start",
+                                 f"SUSTAINED data-quality problem ({int(red_for)}s): {failing} "
+                                 f"— auto-actions FROZEN, window marked degraded")
+                notify.send("Tape: SUSTAINED data-quality problem",
+                            f"[CRITICAL] red {int(red_for)}s: {failing} -> open dashboard",
+                            "critical")
+                log.error("SUSTAINED data-quality problem: %s (frozen)", failing)
+        else:
+            if self._dq_escalated:
+                self._emit_event("warning", "degraded_end",
+                                 "data quality recovered — auto-actions unfrozen")
+                notify.send("Tape: data quality RECOVERED",
+                            "[OK] quality back to non-red", "warning")
+                log.info("data quality recovered — unfrozen")
+            self._dq_red_since = None
+            self._dq_escalated = False
+            self.auto_actions_frozen = False
+
     # ----- health beacon (read by the dashboard, a separate process) -----
 
     def _write_health(self, conn):
@@ -189,6 +277,12 @@ class Collector:
                     self._maybe_heartbeat()
                 except Exception as e:
                     log.debug("heartbeat failed: %r", e)
+                try:
+                    if time.time() - self._last_selfcheck >= config.SELFCHECK_EVERY_SECS:
+                        self._self_assess(conn)
+                        self._last_selfcheck = time.time()
+                except Exception as e:
+                    log.warning("self-assess failed: %r", e)
                 try:
                     self._drain_events(conn)
                 except Exception as e:

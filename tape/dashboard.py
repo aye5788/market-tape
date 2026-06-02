@@ -149,6 +149,32 @@ def _age(now_ms, ts):
     return None if ts is None else round((now_ms - ts) / 1000.0, 1)
 
 
+# The analytics panels (Data Quality + Grid Conditions) are 24h-window metrics
+# that don't need 2s freshness, and they're ~90% of a poll's cost (~80ms of
+# window-function scans vs ~8ms for the live operational panels). Cache them and
+# recompute on a slower cadence so the real-time numbers stay snappy; the heavy
+# recompute is paid once per TTL, not 30x/min.
+_ANALYTICS_TTL_SEC = 15
+_analytics_cache = {"ts": 0.0, "quality": None, "conditions": None}
+
+
+def _analytics(c, now_ms):
+    if (_analytics_cache["quality"] is None
+            or time.time() - _analytics_cache["ts"] >= _ANALYTICS_TTL_SEC):
+        try:
+            q = quality.report(c, now_ms)
+        except Exception as e:
+            q = {"verdict": "gray", "checks": [], "error": str(e),
+                 "window_hours": quality.WINDOW_HOURS}
+        try:
+            cond = conditions.report(c, now_ms)
+        except Exception as e:
+            cond = {"verdict": "gray", "metrics": [], "error": str(e),
+                    "window_hours": conditions.WINDOW_HOURS}
+        _analytics_cache.update(quality=q, conditions=cond, ts=time.time())
+    return _analytics_cache["quality"], _analytics_cache["conditions"]
+
+
 def build_status():
     now = _now_ms()
     out = {"now_ms": now, "db_path": config.DB_PATH}
@@ -305,19 +331,9 @@ def build_status():
         except Exception:
             out["events"] = []
 
-        # ---- data quality (the control-panel headline) ----
-        try:
-            out["quality"] = quality.report(c, now)
-        except Exception as e:
-            out["quality"] = {"verdict": "gray", "checks": [],
-                              "error": str(e), "window_hours": quality.WINDOW_HOURS}
-
-        # ---- grid conditions (advisory market-analytics) ----
-        try:
-            out["conditions"] = conditions.report(c, now)
-        except Exception as e:
-            out["conditions"] = {"verdict": "gray", "metrics": [], "error": str(e),
-                                  "window_hours": conditions.WINDOW_HOURS}
+        # ---- analytics (Data Quality + Grid Conditions): cached on a slower
+        #      cadence so the heavy window-function scans don't run every poll ----
+        out["quality"], out["conditions"] = _analytics(c, now)
         return out
     finally:
         c.close()
