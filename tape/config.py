@@ -107,5 +107,17 @@ HEALTH_EVERY_SECS = 5            # collector writes a liveness row this often
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = 5000            # same slot the MAGI dashboard used
 
+# --- analysis page: interpretation layer (static rules + optional Gemini) ---
+# The Analysis tab explains what the charts mean in plain English. Static rules
+# are always on ($0, private, instant). The LLM narrative is a free-tier Gemini
+# Flash synthesis over the SAME pre-computed numbers — ON by default, toggleable
+# off on the page. Pinned to the free-tier model; every call logs token usage.
+INTERPRET_LLM_ENABLED = True            # master switch for the optional LLM narrative
+INTERPRET_LLM_DEFAULT_ON = True         # page default state (operator can toggle to static)
+INTERPRET_MODEL = "gemini-2.5-flash"    # FREE-tier model (same one Casper uses); never paid
+INTERPRET_KEY_VAR = "GOOGLE_API_KEY"    # reuse the project's existing Gemini key
+INTERPRET_MAX_OUTPUT_TOKENS = 700
+INTERPRET_CACHE_SECS = 300              # cache the narrative server-side (page also won't auto-poll)
+
 # --- logging ---
 LOG_LEVEL = "INFO"
