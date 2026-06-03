@@ -12,15 +12,26 @@ Design notes:
 - Indexes are kept minimal (ts only) — every index is a tax on insert.
 """
 
+# ohlc_1m.source — provenance of a 1m bar, so a backfilled bar is NEVER
+# indistinguishable from one observed live on the wire. The hot path
+# (collector WS callback) writes SRC_WS implicitly via the column DEFAULT.
+SRC_WS = 0          # observed live on the Kraken WS ohlc feed (the default)
+SRC_BACKFILL = 1    # backfilled flat carry-forward bar for a CONFIRMED zero-trade minute
+SRC_RECOVERED = 2   # recovered from Kraken REST for a minute we were blind to (real volume)
+
 DDL = """
 PRAGMA auto_vacuum=INCREMENTAL;   -- lets rollup reclaim space after pruning
 
 -- 1m closed OHLC bars (the base granularity). ts_begin PK dedups the
--- closed-bar snapshots Kraken re-sends on reconnect.
+-- closed-bar snapshots Kraken re-sends on reconnect. `source` records how
+-- the bar got here (0=ws live, 1=backfill of a silent minute, 2=REST-recovered)
+-- — Kraken's ohlc feed only emits on activity, so a zero-trade minute leaves a
+-- hole the backfill layer fills as a flat bar; tagging keeps it auditable.
 CREATE TABLE IF NOT EXISTS ohlc_1m (
     ts_begin INTEGER PRIMARY KEY,
     open  REAL, high REAL, low REAL, close REAL,
-    volume REAL, vwap REAL, trades INTEGER
+    volume REAL, vwap REAL, trades INTEGER,
+    source INTEGER NOT NULL DEFAULT 0
 );
 
 -- The trade tape. trade_id PK dedups the 50-trade snapshot re-sent on
@@ -84,6 +95,14 @@ INSERTS = {
         "(ts_begin, open, high, low, close, volume, vwap, trades) "
         "VALUES (?,?,?,?,?,?,?,?)"
     ),
+    # Provenanced variant used ONLY by the backfill layer (tape/backfill.py),
+    # which sets `source` explicitly. The hot WS path stays on "ohlc_1m" above
+    # and inherits source=0 via the column DEFAULT.
+    "ohlc_1m_provenanced": (
+        "INSERT OR IGNORE INTO ohlc_1m "
+        "(ts_begin, open, high, low, close, volume, vwap, trades, source) "
+        "VALUES (?,?,?,?,?,?,?,?,?)"
+    ),
     "trades": (
         "INSERT OR IGNORE INTO trades "
         "(trade_id, ts, price, qty, side, ord_type) "
@@ -102,12 +121,24 @@ INSERTS = {
 }
 
 
+def _migrate(conn):
+    """Idempotent in-place migrations for DBs created before a column existed.
+    CREATE TABLE IF NOT EXISTS will NOT add a column to a pre-existing table, so
+    any additive column has to be ALTERed in on startup. Safe to run every boot."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(ohlc_1m)")}
+    if "source" not in cols:
+        conn.execute("ALTER TABLE ohlc_1m ADD COLUMN source INTEGER NOT NULL DEFAULT 0")
+
+
 def init_db(db_path):
-    """Create the schema if absent. Safe to call on every startup."""
+    """Create the schema if absent + run additive migrations. Safe to call on
+    every startup."""
     import sqlite3
     conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout=10000")
     try:
         conn.executescript(DDL)
+        _migrate(conn)
         conn.commit()
     finally:
         conn.close()

@@ -67,14 +67,30 @@ ALERT_STALE_SECS = 30            # ws not connected / no data this long = unheal
 ALERT_DOWN_GRACE_SECS = 90       # ...sustained this long before firing a critical
 ALERT_DROP_THRESHOLD = 1000      # writer-dropped rows jump this much = critical
 
-# --- self-assessment / containment (flag-only; NEVER mutates collected data) ---
+# --- self-assessment / containment ---
 # The collector periodically self-grades data quality. Philosophy: auto-act only
-# on small benign gaps; for anything SUSTAINED, stop + flag + escalate, don't
-# overcorrect. Gaps are FLAGGED ONLY (logged as events) — no backfill yet.
+# on small, CONFIRMED-benign conditions; for anything SUSTAINED, stop + flag +
+# escalate, don't overcorrect. A detected 1m gap is first run through the layered
+# backfill below; only what it can't confidently resolve stays FLAGGED (logged as
+# events) for a human.
 SELFCHECK_EVERY_SECS = 60        # how often the collector self-grades quality
 DQ_SUSTAINED_SECS = 180          # quality RED this long = sustained (not a blip) -> escalate
-GAP_SETTLE_SECS = 180            # only flag 1m gaps older than this (lets reconnects re-send)
+GAP_SETTLE_SECS = 180            # only act on 1m gaps older than this (lets reconnects re-send)
 GAP_LOOKBACK_HOURS = 6           # recent window scanned for new gaps each self-check
+
+# --- gap backfill (layered: local connectivity proof + Kraken REST arbiter) ---
+# A Kraken WS ohlc bar is only published on activity, so a zero-trade minute
+# leaves a hole. This fills holes that REST confirms were SILENT (vol==0) with a
+# flat carry-forward bar (tagged source=1), and RECOVERS holes REST shows had
+# real volume (source=2) while ESCALATING them (we were blind). It NEVER fills a
+# gap it can't confirm, never fills while auto-actions are frozen, and never
+# fills a gap larger than BACKFILL_MAX_GAP_BARS (that smells like an outage, not
+# silence — leave it for review). See tape/backfill.py for the decision tree.
+BACKFILL_ENABLED = True
+BACKFILL_MAX_GAP_BARS = 15       # gaps longer than this stay flagged + escalate, not filled
+BACKFILL_REST_URL = "https://api.kraken.com/0/public/OHLC"
+BACKFILL_REST_PAIR = "XRPUSD"    # REST pair code (REST echoes it back as XXRPZUSD)
+BACKFILL_REST_TIMEOUT = 15       # seconds; failure => gap left flagged, never guessed
 
 # --- dead-man's-switch (external watchdog; reuses .env like the ntfy alerts) ---
 # If HEALTHCHECK_PING_URL is set in .env, the collector pings it every

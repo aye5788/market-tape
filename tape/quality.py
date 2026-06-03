@@ -78,6 +78,20 @@ def report(conn, now_ms=None, window_hours=WINDOW_HOURS):
         checks.append({"key": "coverage", "label": "1m coverage",
                        "detail": "no 1m bars in window yet", "status": "gray", "value": None})
 
+    # ---- backfill provenance (transparency: silent fills are benign; a
+    #      REST-recovered bar means we were BLIND for that minute -> yellow) ----
+    has_source = any(r[1] == "source" for r in conn.execute("PRAGMA table_info(ohlc_1m)"))
+    if has_source:
+        silent = scalar("SELECT COUNT(*) FROM ohlc_1m WHERE ts_begin>=? AND source=1", (win,)) or 0
+        recov = scalar("SELECT COUNT(*) FROM ohlc_1m WHERE ts_begin>=? AND source=2", (win,)) or 0
+        if silent == 0 and recov == 0:
+            checks.append({"key": "backfill", "label": "backfilled bars",
+                           "detail": "0 · all bars live-observed", "status": "green", "value": 0})
+        else:
+            checks.append({"key": "backfill", "label": "backfilled bars",
+                           "detail": f"{silent} silent-fill · {recov} REST-recovered",
+                           "status": "yellow" if recov else "green", "value": silent + recov})
+
     # ---- largest contiguous gap (consecutive missing minutes) ----
     gap = scalar("""SELECT MAX(g) FROM (
         SELECT (ts_begin - LAG(ts_begin) OVER (ORDER BY ts_begin))/60000 - 1 AS g

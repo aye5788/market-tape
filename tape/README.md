@@ -58,6 +58,12 @@ it standalone instead (e.g. a systemd timer), set that to `False` and:
 
 - Raw tables are append-only; `trades`/`spread`/`book_l2` are pruned past
   `RAW_RETENTION_DAYS` (default 60). `ohlc_1m` is kept forever (tiny).
+- `ohlc_1m.source` records a bar's **provenance**: `0` = observed live on the WS
+  feed (the default, set by the column DEFAULT on the hot path), `1` = a
+  backfilled flat bar for a minute Kraken REST confirmed was **silent** (zero
+  trades), `2` = a bar **REST-recovered** for a minute we were blind to (real
+  volume). A backfilled bar is therefore never indistinguishable from a live one
+  — filter `WHERE source = 0` for wire-only data. See the backfill section below.
 - `rollup_bars` is permanent.
 - Writer uses WAL + `synchronous=NORMAL` + batched `executemany` (one fsync
   per flush) so plain SQLite keeps up with the tick rate.
@@ -268,26 +274,57 @@ Fires (from the health loop, `config.ALERT_*`):
 Test by hand: `python -m tape.collector` is live; to fire a test push:
 `python -c "from tape import notify; notify.send('Tape: test','[TEST] ignore','warning')"`
 
-## Self-assessment & containment (flag-only — never mutates data)
+## Self-assessment, gap backfill & containment
 
 The collector self-grades data quality every `SELFCHECK_EVERY_SECS` (60 s) in its
-health loop. Design philosophy (operator's): **err on caution — accept the small,
-inevitable loss of a blip, and put the effort into containing a *sustained* or
-systemic problem, not aggressively patching every gap.** So:
+health loop. Design philosophy (operator's): **err on caution — contain a
+*sustained* or systemic problem, and only auto-act on the small,
+exchange-CONFIRMED-benign case.** A detected 1m gap is first run through the
+layered backfill (`tape/backfill.py`); only what it can't confidently resolve is
+flagged.
 
-- **Gaps are FLAGGED ONLY**, never backfilled. A missing 1m bar older than
-  `GAP_SETTLE_SECS` (so a reconnect's re-sent bars aren't false-flagged) is
-  logged once as a `gap` event ("1m gap: N bar(s) missing HH:MM–HH:MM, flagged,
-  not backfilled"). The first pass seeds existing gaps silently. No writes.
+### Why a gap needs a distinguisher (not blanket backfill)
+
+Kraken's WS `ohlc` channel only publishes a bar **on activity** — a minute with
+zero trades produces no bar, so the tape has a hole. That hole is one of two very
+different things, and they must not be conflated:
+
+1. **The exchange was silent** (zero trades). The faithful value is a flat
+   carry-forward bar (`O=H=L=C` = prior close, `vol=0`). Filling it is
+   *reconstruction*, not fabrication.
+2. **We were blind** (disconnected, or a capture bug). Real trades may have
+   happened that we missed. Filling *that* with a flat bar would be fabrication.
+
+The backfill tells them apart with two arbiters and tags every fill:
+
+- **Local connectivity proof** — were we connected, per our own `events` log,
+  for the whole missing minute? (classifies, and sets how loud a loss is).
+- **Kraken public REST OHLC** — the exchange's own record. `vol==0` confirms (1)
+  benign silence → write a flat bar tagged `source=1`. `vol>0` proves (2) we lost
+  real data → recover the bar tagged `source=2` **and escalate** (a `warning`
+  event + ntfy push; missing it *while connected* is flagged as a capture bug).
+- **Bounds:** a gap larger than `BACKFILL_MAX_GAP_BARS` (15) smells like an
+  outage, not silence — left flagged for review, never auto-filled. Backfill is
+  also skipped entirely while `auto_actions_frozen` (a degraded window).
+
+So benign silent minutes self-heal into a contiguous series; genuine data loss is
+recovered *but surfaced loudly*; and anything unconfirmed stays a flagged `gap`
+event with the reason attached. Confirmed-silent fills make the bar present, so
+they no longer count against the quality verdict; the `backfilled bars` quality
+check reports the running `silent-fill` / `REST-recovered` counts for an audit
+trail. Run a one-shot fill of the settled window with
+`python -m tape.backfill`.
+
+### Sustained-problem escalation
+
 - **Only a SUSTAINED red verdict escalates** — quality red for ≥ `DQ_SUSTAINED_SECS`
   (180 s), i.e. not a single blip. On escalation: a distinct **critical** ntfy
   push, a `degraded_start` event marking the window, and `auto_actions_frozen`
   is set — the containment stance is to do *less*, not more, when something is
-  systemically wrong (a bad source must not be trusted to "fix" itself). Recovery
-  emits `degraded_end` and unfreezes.
-- **Nothing here mutates or deletes collected data.** Auto-backfill from REST is
-  deliberately *not* built yet — gaps are surfaced, and turning on real recovery
-  is a future, opt-in switch gated by `auto_actions_frozen`.
+  systemically wrong (a bad source must not be trusted to "fix" itself, and
+  backfill stands down). Recovery emits `degraded_end` and unfreezes.
+- **Backfill only ever ADDS confirmed-or-recovered bars; it never deletes or
+  overwrites** (`INSERT OR IGNORE`), so an observed bar always wins.
 
 All of this surfaces in the dashboard **Events** panel.
 
