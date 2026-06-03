@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily history-warehouse snapshot to GCS (one bigger call, rolling object)
+
+[Timer]
+# Once a day at 04:00 UTC (off-peak). Persistent catches a missed tick on boot.
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

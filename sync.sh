@@ -15,6 +15,8 @@ cd "$DST"
 rsync -a --delete \
   --exclude='market_tape.db' --exclude='market_tape.db-wal' \
   --exclude='market_tape.db-shm' --exclude='backups/' \
+  --exclude='history.db' --exclude='history.db-wal' \
+  --exclude='history.db-shm' --exclude='history.db.snap.*' \
   --exclude='__pycache__/' --exclude='*.pyc' \
   "$SRC/tape/" "$DST/tape/"
 

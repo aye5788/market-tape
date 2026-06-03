@@ -2,5 +2,11 @@
 market_tape.db
 market_tape.db-wal
 market_tape.db-shm
+# The history warehouse (large; built from the Bitstamp CSVs + live tape) is
+# data too — backed up to GCS, never committed.
+history.db
+history.db-wal
+history.db-shm
+history.db.snap.*
 backups/
 __pycache__/

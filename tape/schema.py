@@ -18,6 +18,7 @@ Design notes:
 SRC_WS = 0          # observed live on the Kraken WS ohlc feed (the default)
 SRC_BACKFILL = 1    # backfilled flat carry-forward bar for a CONFIRMED zero-trade minute
 SRC_RECOVERED = 2   # recovered from Kraken REST for a minute we were blind to (real volume)
+SRC_BITSTAMP = 3    # imported Bitstamp historical bar (history warehouse only, NOT the live tape)
 
 DDL = """
 PRAGMA auto_vacuum=INCREMENTAL;   -- lets rollup reclaim space after pruning

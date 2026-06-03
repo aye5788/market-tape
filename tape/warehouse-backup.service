@@ -1,0 +1,12 @@
+[Unit]
+Description=History warehouse backup (consistent snapshot -> gzip -> GCS, single rolling object)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/xrp_grid
+# gsutil lives in the Google Cloud SDK; ensure it's on PATH for the job.
+Environment=PATH=/root/google-cloud-sdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/root/xrp_grid/venv/bin/python3 -m tape.warehouse backup

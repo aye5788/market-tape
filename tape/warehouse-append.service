@@ -1,0 +1,10 @@
+[Unit]
+Description=History warehouse append (pull new bars from the live tape; LOCAL, no GCS)
+# Local file -> local file only; no network needed, but harmless to wait.
+After=tape-collector.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/xrp_grid
+ExecStart=/root/xrp_grid/venv/bin/python3 -m tape.warehouse append

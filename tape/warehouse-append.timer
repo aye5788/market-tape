@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly history-warehouse append from the live tape (local, free)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true              # catch up on boot if an hourly tick was missed
+RandomizedDelaySec=90        # don't fire exactly on the hour
+
+[Install]
+WantedBy=timers.target

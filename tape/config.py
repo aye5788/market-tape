@@ -119,5 +119,18 @@ INTERPRET_KEY_VAR = "GOOGLE_API_KEY"    # reuse the project's existing Gemini ke
 INTERPRET_MAX_OUTPUT_TOKENS = 700
 INTERPRET_CACHE_SECS = 300              # cache the narrative server-side (page also won't auto-poll)
 
+# --- history warehouse (SEPARATE store; merged deep history + live append) ---
+# Built and maintained by tape/warehouse.py — a DB DISTINCT from the collector's
+# market_tape.db. Holds the contiguous XRP 1m history (Bitstamp 2017->Jun2 +
+# Kraken live Jun2->now, tagged by ohlc_1m.source) plus the SAME rollups
+# (5/60/360/1440). The live collector NEVER touches it: an hourly local job
+# appends new bars from market_tape.db (free, no GCS), and a daily job snapshots
+# it to GCS as a single rolling object. Same schema as the tape, so the Analysis
+# tab can read it identically (flow columns stay NULL — the deep history is OHLC
+# only, no order-flow tape existed then).
+HISTORY_DB_PATH = os.path.join(_HERE, "history.db")
+HISTORY_IMPORT_DIR = "/root/hist_import"             # where the Bitstamp yearly CSVs are staged
+HISTORY_BACKUP_REMOTE = f"{BACKUP_BUCKET}/history/history.db.gz"   # single rolling GCS snapshot
+
 # --- logging ---
 LOG_LEVEL = "INFO"
