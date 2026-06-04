@@ -48,6 +48,19 @@ log = logging.getLogger("tape.warehouse")
 
 _MIN_MS = 60_000
 
+# Trailing reconciliation window for the hourly append (a). We re-scan this far
+# back and rely on INSERT OR IGNORE (ts_begin / trade_id are PKs) for dedup, so
+# out-of-order silent-minute backfills the collector writes BELOW its high-water
+# mark are still picked up instead of being permanently skipped by a strict MAX()
+# watermark (e.g. the 2026-06-04 07:02-07:05 hole).
+APPEND_RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000   # 7d trailing window
+
+# Sentinel retention for the WAREHOUSE rollup call only: so large the prune cutoff
+# is effectively -inf, so rollup.run_once never deletes a raw row here. history.db
+# is a keep-everything downtime instrument; the live collector keeps its own 60d
+# rolling prune (config.RAW_RETENTION_DAYS) untouched.
+NO_PRUNE_RETENTION_DAYS = 100_000
+
 
 def _connect(path, wal=True):
     c = sqlite3.connect(path, timeout=30)
@@ -220,28 +233,56 @@ def cmd_build(args):
 # --------------------------------------------------------------- ongoing append
 
 def cmd_append(args):
-    """Hourly, local-only: pull bars from the tape newer than what we have, then
-    incremental-rollup the trailing window. No GCS, no cost."""
+    """Hourly, local-only: pull new 1m bars + the rich tape (trades / spread) from
+    the live collector over a trailing reconciliation window, then incremental-roll
+    the trailing window. No GCS, no cost.
+
+    Idempotent and out-of-order-safe:
+      (a) ohlc_1m — re-scanned over APPEND_RECONCILE_WINDOW_MS and deduped by the
+          ts_begin PK via INSERT OR IGNORE, so silent-minute backfills the collector
+          writes behind its high-water mark are healed, not skipped.
+      (b) trades  — same trailing-window + trade_id PK dedup.
+      (c) spread  — no natural key, so copied by a strict ts watermark (> MAX(ts));
+          its own autoincrement id is NOT carried (warehouse assigns its own).
+    book_l2 is out of scope (the "book" channel is disabled upstream; 0 rows). The
+    warehouse never prunes (NO_PRUNE_RETENTION_DAYS) — keep-everything instrument."""
     if not os.path.exists(config.HISTORY_DB_PATH):
         raise SystemExit("history.db does not exist — run `build` first")
     conn = _connect(config.HISTORY_DB_PATH)
     try:
         have = conn.execute("SELECT COALESCE(MAX(ts_begin), 0) FROM ohlc_1m").fetchone()[0]
         conn.execute("ATTACH DATABASE ? AS live", (config.DB_PATH,))
+        # (a) 1m bars — trailing-window merge (gap-aware; ts_begin PK dedups).
         cur = conn.execute(
             "INSERT OR IGNORE INTO ohlc_1m "
             "(ts_begin, open, high, low, close, volume, vwap, trades, source) "
             "SELECT ts_begin, open, high, low, close, volume, vwap, trades, source "
-            "FROM live.ohlc_1m WHERE ts_begin > ?", (have,))
-        conn.commit()
+            "FROM live.ohlc_1m WHERE ts_begin >= ?", (have - APPEND_RECONCILE_WINDOW_MS,))
         n = cur.rowcount
+        # (b) trade tape — trailing-window merge (trade_id PK dedups).
+        ct = conn.execute(
+            "INSERT OR IGNORE INTO trades "
+            "(trade_id, ts, price, qty, side, ord_type) "
+            "SELECT trade_id, ts, price, qty, side, ord_type FROM live.trades "
+            "WHERE ts >= (SELECT COALESCE(MAX(ts), 0) FROM trades) - ?",
+            (APPEND_RECONCILE_WINDOW_MS,))
+        nt = ct.rowcount
+        # (c) spread tape — strict ts watermark; id NOT carried (no cross-db key).
+        cs = conn.execute(
+            "INSERT INTO spread (ts, bid, bid_qty, ask, ask_qty, last) "
+            "SELECT ts, bid, bid_qty, ask, ask_qty, last FROM live.spread "
+            "WHERE ts > (SELECT COALESCE(MAX(ts), 0) FROM spread)")
+        ns = cs.rowcount
+        conn.commit()
         conn.execute("DETACH DATABASE live")
     finally:
         conn.close()
     # incremental rollup over the trailing window (memory-safe; small window).
+    # downtime instrument: keep rich data, do not prune the warehouse (live db prunes itself)
     rollup.run_once(config.HISTORY_DB_PATH, config.ROLLUP_INTERVALS_MIN,
-                    config.ROLLUP_LOOKBACK_HOURS, config.RAW_RETENTION_DAYS, full=False)
-    log.info("appended %d new bars (since %s)", n, _utc(have) if have else "start")
+                    config.ROLLUP_LOOKBACK_HOURS, NO_PRUNE_RETENTION_DAYS, full=False)
+    log.info("appended %d bars, %d trades, %d spread rows (ohlc since %s)",
+             n, nt, ns, _utc(have) if have else "start")
     return n
 
 

@@ -737,20 +737,20 @@ function buildCharts(d){
 
   charts.vol=mk('chVol',200);
   S.volLine=charts.vol.addLineSeries({color:'#ffaa00',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-  S.volLine.createPriceLine({price:d.volatility.fee_floor_pct,color:'#ff3333',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'fee floor'});
-  S.volLine.createPriceLine({price:d.volatility.optimal_pct,color:'#00ff66',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'optimal 1.5%'});
+  S.volLine.createPriceLine({price:d.volatility.fee_floor_pct,color:'#ff3333',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'fee floor (below = too quiet)'});
+  S.volLine.createPriceLine({price:d.volatility.optimal_pct,color:'#00ff66',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'optimal 1.5% (above = ample)'});
 
   charts.reg=mk('chReg',200);
   S.reg=charts.reg.addLineSeries({color:'#00e5e5',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-  S.reg.createPriceLine({price:d.regime.choppy_max,color:'#00ff66',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'choppy'});
-  S.reg.createPriceLine({price:d.regime.trending_min,color:'#ff3333',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'trending'});
+  S.reg.createPriceLine({price:d.regime.choppy_max,color:'#00ff66',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'choppy (below = grid-friendly)'});
+  S.reg.createPriceLine({price:d.regime.trending_min,color:'#ff3333',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'trending (above = grid bleeds)'});
 
   charts.flow=mk('chFlow',180);
   S.flow=charts.flow.addHistogramSeries({priceFormat:{type:'volume'},base:0});
 
   charts.harv=mk('chHarv',180);
   S.harv=charts.harv.addHistogramSeries({base:0});
-  S.harv.createPriceLine({price:d.harvest.spacing_pct,color:'#00ff66',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'1 step'});
+  S.harv.createPriceLine({price:d.harvest.spacing_pct,color:'#00ff66',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'1 step (above = harvestable)'});
   built=true;
 }
 function render(d){
