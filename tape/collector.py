@@ -98,8 +98,7 @@ class Collector:
         self._selfcheck_seeded = False     # first pass seeds unfillable gaps silently
         self._logged_gaps = set()
         self._dq_red_since = None
-        self._dq_escalated = False
-        self.auto_actions_frozen = False   # True on sustained problem -> backfill stands down
+        self._dq_escalated = False   # latched while an our-side/corruption problem persists
 
     # ----- WS callbacks -> writer.put -----
 
@@ -188,18 +187,27 @@ class Collector:
         through the LAYERED backfill (tape/backfill.py): a gap REST confirms was
         a silent minute is filled with a flat carry-forward bar; a gap REST shows
         had real volume is recovered AND escalated (we were blind); anything it
-        can't confidently resolve stays FLAGGED for a human. Backfill is skipped
-        entirely while auto-actions are frozen. Separately, a SUSTAINED red
-        verdict (not a single blip) escalates: critical alert + degraded-window
-        marker + freezing auto-actions. The philosophy is unchanged — a
-        sustained/systemic problem makes us LESS aggressive (freeze + escalate),
-        not more; backfill only acts on the small, exchange-CONFIRMED-benign case."""
+        can't confidently resolve stays FLAGGED for a human. Backfill ALWAYS runs
+        — it is the conservative remediation (REST-arbitrated, fills only
+        exchange-confirmed-silent minutes, bounded to <=BACKFILL_MAX_GAP_BARS,
+        and escalates+tags any real loss), so it can never worsen corruption and
+        must not be gated behind the degraded marker (that gated the very fix the
+        gap needs, deadlocking on every Kraken-maintenance gap).
+
+        Separately, a SUSTAINED problem escalates: critical alert + degraded
+        marker. The trigger is `quality.escalating_red` — only OUR-side / active-
+        corruption checks (collector dead, malformed bars, crossed spreads,
+        broken rollups). Exchange-side, self-healing conditions (gaps, coverage,
+        a briefly-stale feed during Kraken maintenance) deliberately do NOT
+        escalate: they auto-heal via backfill, so paging on them is noise and
+        freezing on them is the deadlock. The dashboard verdict still reflects
+        ALL checks, so a healing gap stays visible while it clears."""
         now = _now_ms()
 
         # --- gap detection -> layered backfill -> flag-only for the residual ---
         gaps = self._detect_gaps(conn, now)
         results = []
-        if config.BACKFILL_ENABLED and gaps and not self.auto_actions_frozen:
+        if config.BACKFILL_ENABLED and gaps:
             try:
                 results = backfill.backfill_gaps(conn, gaps)
             except Exception as e:
@@ -239,38 +247,38 @@ class Collector:
         if len(self._logged_gaps) > 1000:
             self._logged_gaps = set(sorted(self._logged_gaps)[-1000:])
 
-        # --- sustained-problem detection on the quality verdict ---
+        # --- sustained-problem detection on OUR-side / corruption checks only ---
+        # (exchange-side gaps/stale-feed self-heal via backfill above and must
+        # neither page nor freeze — see quality.ESCALATE_KEYS).
         try:
             rep = quality.report(conn, now)
         except Exception as e:
             log.warning("self-assess quality report failed: %r", e)
             return
-        if rep.get("verdict") == "red":
+        escalating = quality.escalating_red(rep)
+        if escalating:
             if self._dq_red_since is None:
                 self._dq_red_since = time.time()
             red_for = time.time() - self._dq_red_since
             if red_for >= config.DQ_SUSTAINED_SECS and not self._dq_escalated:
-                failing = ", ".join(c["label"] for c in rep.get("checks", [])
-                                    if c.get("status") == "red") or "unknown"
-                self.auto_actions_frozen = True
+                failing = ", ".join(c["label"] for c in escalating)
                 self._dq_escalated = True
                 self._emit_event("critical", "degraded_start",
                                  f"SUSTAINED data-quality problem ({int(red_for)}s): {failing} "
-                                 f"— auto-actions FROZEN, window marked degraded")
+                                 f"— window marked degraded")
                 notify.send("Tape: SUSTAINED data-quality problem",
                             f"[CRITICAL] red {int(red_for)}s: {failing} -> open dashboard",
                             "critical")
-                log.error("SUSTAINED data-quality problem: %s (frozen)", failing)
+                log.error("SUSTAINED data-quality problem: %s", failing)
         else:
             if self._dq_escalated:
                 self._emit_event("warning", "degraded_end",
-                                 "data quality recovered — auto-actions unfrozen")
+                                 "data quality recovered — degraded window cleared")
                 notify.send("Tape: data quality RECOVERED",
-                            "[OK] quality back to non-red", "warning")
-                log.info("data quality recovered — unfrozen")
+                            "[OK] our-side checks back to green", "warning")
+                log.info("data quality recovered")
             self._dq_red_since = None
             self._dq_escalated = False
-            self.auto_actions_frozen = False
 
     # ----- health beacon (read by the dashboard, a separate process) -----
 

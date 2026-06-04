@@ -304,8 +304,11 @@ The backfill tells them apart with two arbiters and tags every fill:
   real data → recover the bar tagged `source=2` **and escalate** (a `warning`
   event + ntfy push; missing it *while connected* is flagged as a capture bug).
 - **Bounds:** a gap larger than `BACKFILL_MAX_GAP_BARS` (15) smells like an
-  outage, not silence — left flagged for review, never auto-filled. Backfill is
-  also skipped entirely while `auto_actions_frozen` (a degraded window).
+  outage, not silence — left flagged for review, never auto-filled. Backfill
+  **always runs** (it is the conservative, bounded, self-escalating remediation),
+  so it can never worsen corruption and is never gated behind the degraded window
+  — gating it there deadlocked: the unfilled gap kept the verdict red, which kept
+  the freeze on, which kept backfill from clearing the gap.
 
 So benign silent minutes self-heal into a contiguous series; genuine data loss is
 recovered *but surfaced loudly*; and anything unconfirmed stays a flagged `gap`
@@ -317,12 +320,15 @@ trail. Run a one-shot fill of the settled window with
 
 ### Sustained-problem escalation
 
-- **Only a SUSTAINED red verdict escalates** — quality red for ≥ `DQ_SUSTAINED_SECS`
-  (180 s), i.e. not a single blip. On escalation: a distinct **critical** ntfy
-  push, a `degraded_start` event marking the window, and `auto_actions_frozen`
-  is set — the containment stance is to do *less*, not more, when something is
-  systemically wrong (a bad source must not be trusted to "fix" itself, and
-  backfill stands down). Recovery emits `degraded_end` and unfreezes.
+- **Only a SUSTAINED our-side problem escalates** — an `ESCALATE_KEYS` check
+  (collector beacon dead, malformed bars, crossed spreads, broken rollups) red
+  for ≥ `DQ_SUSTAINED_SECS` (180 s), i.e. not a single blip. On escalation: a
+  distinct **critical** ntfy push and a `degraded_start` event marking the
+  window; recovery emits `degraded_end`. Exchange-side, self-healing conditions
+  (gaps, coverage, a briefly-stale feed during a Kraken maintenance window) are
+  deliberately **excluded** — they auto-heal via backfill, so paging on them is
+  noise and freezing on them is the deadlock above. The dashboard verdict still
+  reflects ALL checks, so a healing gap stays visible while it clears.
 - **Backfill only ever ADDS confirmed-or-recovered bars; it never deletes or
   overwrites** (`INSERT OR IGNORE`), so an observed bar always wins.
 

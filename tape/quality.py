@@ -40,6 +40,19 @@ BEACON_STALE_SEC = 30      # beacon cadence is 5s; >30s = collector not reportin
 
 _RANK = {"green": 0, "gray": 0, "yellow": 1, "red": 2}
 
+# Checks whose RED state warrants paging a human + freezing aggressive actions:
+# an OUR-side failure or ACTIVE corruption that backfill cannot fix. Exchange-
+# side / transient conditions (coverage, gaps, a briefly-stale feed during a
+# Kraken maintenance window, backfill provenance, price anomalies) are
+# deliberately EXCLUDED — they self-heal via the layered backfill and must NOT
+# freeze it or fire a critical push (doing so deadlocks: the gap keeps the
+# verdict red, the freeze blocks the backfill that would clear it). `beacon`
+# independently catches "our collector is dead", which is why a stale feed alone
+# (bar_fresh) is not escalation-worthy — if the process is alive and Kraken is
+# just quiet, that is benign and backfill handles it.
+ESCALATE_KEYS = {"beacon", "bar_valid", "spread_valid",
+                 "trades_valid", "trades_order", "rollup"}
+
 
 def _worst(checks):
     w = "green"
@@ -47,6 +60,14 @@ def _worst(checks):
         if _RANK.get(ch["status"], 0) > _RANK[w]:
             w = ch["status"]
     return w
+
+
+def escalating_red(rep):
+    """The subset of RED checks that warrant a human page (∩ ESCALATE_KEYS).
+    The dashboard verdict still reflects ALL checks (so a healing gap stays
+    visible); this is ONLY the escalation/freeze trigger."""
+    return [c for c in rep.get("checks", [])
+            if c.get("status") == "red" and c.get("key") in ESCALATE_KEYS]
 
 
 def report(conn, now_ms=None, window_hours=WINDOW_HOURS):
