@@ -36,6 +36,7 @@ log = logging.getLogger("tape.interpret")
 _KEY_BY_PREFIX = {
     "hourly volatility": "volatility",
     "regime": "regime",
+    "drawdown from high": "drawdown",
     "flow imbalance": "flow",
     "harvest rate": "harvest",
 }
@@ -109,6 +110,23 @@ def static_interpret(summary):
                          "a fall or selling into a rise — and books unrealized losses (the 'bleed'). "
                          "This is when to stand down or recenter; a static grid run into a trend is how "
                          "it loses money.")
+
+    dd = _metric(summary, "drawdown from high")
+    dst = dd.get("status")
+    if dst == "green":
+        per["drawdown"] = ("At or near the recent high — no downtrend bleed. The grid's buy fills are "
+                           "close to water, so accumulated inventory isn't underwater. This is the safe "
+                           "side of the trend signal; the regime read is the one to watch here.")
+    elif dst == "yellow":
+        per["drawdown"] = ("Price has slipped below its recent high — early downtrend bleed. The lower "
+                           "buys are now underwater and inventory is worth less than it was bought for: "
+                           "not severe yet, but if price keeps falling the grid keeps catching the knife. "
+                           "Watch whether the regime is also turning trending — that pair is the bleed.")
+    elif dst == "red":
+        per["drawdown"] = ("Deep drawdown from the high — active capital erosion. Price has fallen more "
+                           "than two grid steps off its peak, so the grid has been buying the whole way "
+                           "down and is sitting on losing inventory. Recenter or stand down rather than "
+                           "keep adding to the falling side.")
 
     flow = _metric(summary, "flow imbalance")
     fst, val = flow.get("status"), flow.get("value")
@@ -213,6 +231,7 @@ Return STRICT JSON, no markdown, with this shape:
   "per_metric": {{
      "volatility": "<1-2 sentences: what it means + what to do>",
      "regime": "<1-2 sentences: what it means + what to do>",
+     "drawdown": "<1 sentence: how far below the recent high + whether it is downtrend bleed to act on>",
      "flow": "<1 sentence: what it implies + whether to act>",
      "harvest": "<1 sentence: what it implies for spacing/opportunity>"}}}}"""
 

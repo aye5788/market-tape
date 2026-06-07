@@ -34,6 +34,15 @@ FIRM_SPACING_PCT = 0.0075  # 1.5 x fee floor: adaptive spacing must clear break-
                            # by >=0.25% to count as "firm" (vs "thin", near the floor)
 MIN_SPACING_PCT = 0.003    # config.py clamp
 MAX_SPACING_PCT = 0.025    # config.py clamp
+# Downtrend-bleed marker: how far price has fallen below its recent high. The
+# regime efficiency ratio above is direction-BLIND (a clean rally and a clean
+# crash both read "trending"); this is the signed, directional counterpart that
+# isolates the dangerous half — the grid buying the whole way down into losing
+# inventory. Anchored to grid geometry, NOT fitted: 2 grid steps (2 x 1.5% = 3%)
+# below the high means the recent buys are underwater by more than a round-trip
+# can harvest back. Same "drawdown from high" measure MAGI tracks as
+# drawdown_from_high_7d (magi/orchestrator.py), here over the conditions window.
+BLEED_DD_PCT = SPACING_PCT * 2   # 3.0%
 
 WINDOW_HOURS = 24
 FLOW_HOURS   = 6
@@ -45,12 +54,17 @@ _DRIVERS = ("hourly volatility", "regime", "harvest rate")  # flow is context on
 
 
 def report(conn, now_ms=None, window_hours=WINDOW_HOURS):
+    # now_ms is the AS-OF instant: every metric is computed over its trailing
+    # window ENDING at now_ms. Defaults to wall-clock (the live dashboard read);
+    # pass a historical ts to replay a past snapshot (warehouse signals backfill).
+    # Both window queries below are bounded at <= now so a replay never peeks past
+    # its as-of time; for the live path (now = latest bar) the bound is a no-op.
     now = now_ms or int(time.time() * 1000)
     win = now - window_hours * 3_600_000
 
     bars = conn.execute(
-        "SELECT open, high, low, close FROM ohlc_1m WHERE ts_begin>=? ORDER BY ts_begin",
-        (win,)).fetchall()
+        "SELECT open, high, low, close FROM ohlc_1m WHERE ts_begin>=? AND ts_begin<=? "
+        "ORDER BY ts_begin", (win, now)).fetchall()
     closes = [b[3] for b in bars if b[3]]
     if len(closes) < MIN_BARS:
         return {"verdict": "gray", "advisory": True, "window_hours": window_hours,
@@ -98,11 +112,32 @@ def report(conn, now_ms=None, window_hours=WINDOW_HOURS):
                               f"{'↑' if net >= 0 else '↓'}{abs(net_pct):.2f}%/{window_hours}h",
                     "value": round(er, 3)})
 
+    # ---- drawdown from high: the DIRECTIONAL 'downtrend bleed' read ----
+    # ER is direction-blind; this is the signed counterpart. peak = the window's
+    # running high (highs >= closes, so dd <= 0). Context, NOT a verdict driver
+    # (excluded from _DRIVERS) — mirrors MAGI, which treats drawdown_from_high as
+    # a risk-judgment input, not a mechanical gate. A sustained one-way fall
+    # already trips the regime driver; this surfaces WHICH way and how deep.
+    highs = [b[1] for b in bars if b[1]]
+    peak = max(highs) if highs else None
+    dd_pct = ((closes[-1] - peak) / peak * 100.0) if peak else 0.0
+    if dd_pct > -SPACING_PCT * 100:
+        dd_status = "green"                     # within 1 step of the high
+    elif dd_pct > -BLEED_DD_PCT * 100:
+        dd_status = "yellow"                    # 1-2 steps below: early bleed
+    else:
+        dd_status = "red"                       # >= 2 steps below: capital erosion
+    metrics.append({"label": "drawdown from high", "status": dd_status,
+                    "detail": f"{dd_pct:+.2f}% from {window_hours}h high · "
+                              f"bleed ≤ -{BLEED_DD_PCT*100:.1f}%",
+                    "value": round(dd_pct, 2)})
+
     # ---- flow imbalance (aggressor buy vs sell, recent) ----
     buy, sell = conn.execute(
         "SELECT COALESCE(SUM(CASE WHEN side=0 THEN qty END),0), "
         "       COALESCE(SUM(CASE WHEN side=1 THEN qty END),0) "
-        "FROM trades WHERE ts>=?", (now - FLOW_HOURS * 3_600_000,)).fetchone()
+        "FROM trades WHERE ts>=? AND ts<=?",
+        (now - FLOW_HOURS * 3_600_000, now)).fetchone()
     tot = (buy or 0) + (sell or 0)
     if tot > 0:
         imb = (buy - sell) / tot

@@ -694,6 +694,9 @@ _ANALYSIS_PAGE = """<!doctype html>
     <div class="card"><h2>Trend vs chop</h2>
       <div id="chReg" class="chart mid"></div>
       <div class="caption" id="capReg"></div></div>
+    <div class="card"><h2>Downtrend bleed &mdash; drawdown from high</h2>
+      <div id="chDD" class="chart mid"></div>
+      <div class="caption" id="capDD"></div></div>
     <div class="card"><h2>Buy / sell pressure</h2>
       <div id="chFlow" class="chart sm"></div>
       <div class="caption" id="capFlow"></div></div>
@@ -745,6 +748,10 @@ function buildCharts(d){
   S.reg.createPriceLine({price:d.regime.choppy_max,color:'#00ff66',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'choppy (below = grid-friendly)'});
   S.reg.createPriceLine({price:d.regime.trending_min,color:'#ff3333',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'trending (above = grid bleeds)'});
 
+  charts.dd=mk('chDD',200);
+  S.dd=charts.dd.addLineSeries({color:'#00e5e5',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
+  S.dd.createPriceLine({price:d.drawdown.bleed_pct,color:'#ff3333',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'downtrend bleed (below = capital erosion)'});
+
   charts.flow=mk('chFlow',180);
   S.flow=charts.flow.addHistogramSeries({priceFormat:{type:'volume'},base:0});
 
@@ -761,6 +768,7 @@ function render(d){
   S.ma.setData(state.ma?ma(d.price.candles,20):[]);
   S.volLine.setData(d.volatility.line);
   S.reg.setData(d.regime.line);
+  S.dd.setData(d.drawdown.line);
   S.flow.setData(d.flow.bars);
   S.harv.setData(d.harvest.bars);
   for(const k in charts){try{charts[k].timeScale().fitContent();}catch(e){}}
@@ -778,6 +786,7 @@ function render(d){
   const pm=it.per_metric||{};
   $('capVol').textContent=pm.volatility||'';
   $('capReg').textContent=pm.regime||'';
+  $('capDD').textContent=pm.drawdown||'';
   $('capFlow').textContent=pm.flow||'';
   $('capHarv').textContent=pm.harvest||'';
   $('meta').textContent='range '+d.range_hours+'h · res '+d.resolution_min+'m · '+d.bars+

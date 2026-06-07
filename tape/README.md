@@ -107,8 +107,10 @@ process health (ws state / reconnects / rows written-dropped, from the
 market snapshot, storage usage, rollup status, **Backup & durability**,
 **Events** (alert + ws-state history from the `events` table), and **Grid
 Conditions** (advisory market-analytics: realized vol → suggested spacing,
-regime, flow imbalance, harvest rate — `tape/conditions.py`, enforces nothing —
-see below). Page polls
+regime, drawdown-from-high, flow imbalance, harvest rate — `tape/conditions.py`,
+enforces nothing — see below). Each Grid-Conditions chart carries reference lines
+for its grid-relevant thresholds (fee floor / optimal spacing, choppy-vs-trending,
+the downtrend-bleed level, harvestable step). Page polls
 `/api/status` every 2s. Styled in the MAGI terminal palette (amber/orange on
 black, Michroma title + VT323 verdict + Courier-New body — same fonts the
 archived MAGI dashboard loads) so it reads as the same control surface.
@@ -152,8 +154,11 @@ nothing; the verdict is decision-support, shown in `/api/status` under
 `conditions`.
 
 The headline GREEN / YELLOW / RED is the **worst of three drivers** — hourly
-volatility, regime, harvest rate. **Flow imbalance is context only and never
-moves the verdict** (short-window flow is too noisy to gate on).
+volatility, regime, harvest rate. **Flow imbalance and drawdown-from-high are
+context only and never move the verdict** — short-window flow is too noisy to gate
+on, and drawdown is left advisory deliberately (a sustained one-way fall already
+trips the regime driver, and MAGI itself treats drawdown as a risk-judgment input,
+not a gate).
 
 - **hourly volatility** — realized σ (1m log-returns ×√60) plus a vol-tracking
   *adaptive spacing* (σ clamped to 0.3–2.5%). 🔴 σ<0.50% (below the fee floor —
@@ -166,7 +171,18 @@ moves the verdict** (short-window flow is too noisy to gate on).
   (`+0.42% over fee floor`), so read the number, not just the chip.
 - **regime** — efficiency ratio (|net move| ÷ summed minute moves) + net %/24h.
   🟢 ER<0.30 choppy / mean-reverting (grid-favourable), 🟡 0.30–0.50 mixed, 🔴
-  ≥0.50 trending (the grid-downtrend-bleed early warning).
+  ≥0.50 trending (the grid-downtrend-bleed early warning). Note ER is **direction
+  blind** — it is built on |net move|, so a clean rally and a clean crash both read
+  "trending." Which way it is going (and whether that is the dangerous way) is the
+  drawdown signal's job.
+- **drawdown from high** — signed % of price below its running high over the window
+  — the **directional** counterpart to the direction-blind regime ER. Only the
+  *downward* half of a trend bleeds the grid (it keeps buying into the fall and
+  books losing inventory); an uptrend that breaks the grid costs opportunity, not
+  capital. 🟢 within one grid step of the high (>−1.5%), 🟡 one-to-two steps below,
+  🔴 ≥ two steps below (−3% = 2×spacing — active capital erosion). Threshold is grid
+  geometry, not fitted. Context only; uses MAGI's exact `drawdown_from_high`
+  definition so the tape monitor and the trading brain agree on the measure.
 - **flow imbalance (6h)** — aggressor buy vs sell volume; context only, excluded
   from the verdict.
 - **harvest rate** — fraction of completed 1h buckets whose high–low range ≥1.5%
@@ -186,6 +202,31 @@ One-shot report from the CLI:
 ```bash
 /root/xrp_grid/venv/bin/python3 -m tape.conditions
 ```
+
+### Conditions history (`signals_1h` in the warehouse)
+
+The same `conditions.report()` metrics are persisted as an **hourly time series**
+in the history warehouse (`tape/history.db`, table `signals_1h`), so the
+grid-favourability read is queryable over time, not just "right now." One row per
+hour, *as of* that hour (each metric over its trailing window **ending** there):
+the overall verdict plus every metric's value and status.
+
+Because each signal is a **deterministic function of the stored OHLC/trade bars**,
+the table is pure replay — it can be rebuilt at any time and can never disagree
+with what the dashboard renders for a given instant. (`conditions.report()` takes a
+`now_ms` as-of argument and bounds both its windows at `≤ now_ms`, so a replay never
+peeks past its as-of time.)
+
+- **Backfill the full history:** `python -m tape.warehouse build-signals` — replays
+  hourly across the whole ~9.5y (~83k rows), idempotent (`INSERT OR REPLACE`).
+- **Going forward:** the hourly `warehouse-append` writes new rows automatically
+  (see `_signals_incremental` in `warehouse.py`) — no extra service or timer.
+
+Provenance: a `source` column flags each row `1` = backfilled / `0` = live.
+**Flow imbalance is NULL before 2026-06-02** — it needs the trade tape, which only
+exists from the live-collector era; the other four signals (vol, regime, drawdown,
+harvest) reconstruct across the entire history. `status` is `gray` where a window
+lacked the data to compute a metric (e.g. flow over the pre-tape span).
 
 ## Dashboard performance (two clocks — keep heavy queries off the 2s path)
 

@@ -111,6 +111,27 @@ def _vol_regime_lines(conn, since_ms):
     return vol_line, reg_line
 
 
+def _drawdown_line(conn, since_ms):
+    """Signed drawdown (%) of close from the running peak high over the visible
+    range — the DIRECTIONAL 'downtrend bleed' counterpart to the (direction-blind)
+    regime efficiency ratio. Same 'drawdown from high' measure MAGI tracks as
+    drawdown_from_high_7d (magi/orchestrator.py), but referenced to the chart's
+    range high rather than a fixed 7d window, so the line scales with whatever
+    range the page is showing. <= 0.0; 0.0 = at/above the range high. Computed on
+    the 1m base then decimated, like the vol/regime lines."""
+    df = pd.read_sql_query(
+        "SELECT ts_begin, high, close FROM ohlc_1m WHERE ts_begin>=? ORDER BY ts_begin",
+        conn, params=(since_ms,))
+    if len(df) < _MIN_PERIODS + 1:
+        return []
+    peak = df["high"].astype(float).cummax()
+    dd = ((df["close"].astype(float) - peak) / peak * 100.0).where(peak > 0)
+    out = _decimate(pd.DataFrame({"ts_begin": df["ts_begin"], "dd": dd})
+                    .reset_index(drop=True))
+    return [{"time": int(t // 1000), "value": round(float(v), 4)}
+            for t, v in zip(out["ts_begin"], out["dd"]) if pd.notna(v)]
+
+
 def flow_series(conn, since_ms, bucket_min):
     """Net aggressor flow (buy-vol minus sell-vol) per time bucket, as a signed
     histogram. Aggregated in SQL so we never load the whole trade tape."""
@@ -150,6 +171,7 @@ def build(conn, res_min=None, range_hours=24, now_ms=None):
     df = _candles_df(conn, res_min, since)
     candles, volume = price_series(df) if len(df) else ([], [])
     vol_line, reg_line = _vol_regime_lines(conn, since)
+    dd_line = _drawdown_line(conn, since)
     flow = flow_series(conn, since, res_min if res_min >= 5 else 5)
     harvest = harvest_series(df, conditions.SPACING_PCT) if len(df) else []
     summary = conditions.report(conn, now)
@@ -166,6 +188,9 @@ def build(conn, res_min=None, range_hours=24, now_ms=None):
                        "firm_pct": conditions.FIRM_SPACING_PCT * 100,
                        "optimal_pct": conditions.SPACING_PCT * 100},
         "regime": {"line": reg_line, "choppy_max": 0.30, "trending_min": 0.50},
+        # Signed % drawdown from the running range high (<= 0); bleed_pct is the
+        # negative threshold the chart draws as the 'downtrend bleed' line.
+        "drawdown": {"line": dd_line, "bleed_pct": -conditions.BLEED_DD_PCT * 100},
         "flow": {"bars": flow},
         "harvest": {"bars": harvest, "spacing_pct": conditions.SPACING_PCT * 100},
         "summary": summary,

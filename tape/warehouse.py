@@ -40,6 +40,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
+from tape import conditions
 from tape import config
 from tape import rollup
 from tape import schema
@@ -68,6 +69,105 @@ def _connect(path, wal=True):
     if wal:
         c.execute("PRAGMA journal_mode=WAL")
     return c
+
+
+# --- derived conditions snapshots (signals_1h) --------------------------------
+# The analysis-page grid signals (conditions.report) recorded as a TIME SERIES —
+# one row per top-of-hour, AS OF that hour (each metric over its trailing window
+# ending there). Lives only in history.db (the keep-everything store), never in
+# the live market_tape.db. Fully backfillable because every signal is a
+# deterministic function of ohlc_1m / rollups we already keep — flow imbalance is
+# the lone exception (it needs the trade tape, which only exists from the live
+# collector forward), so flow_* is NULL for the deep, pre-tape span.
+SIG_LIVE     = 0   # snapshot written at/near real time by the hourly append
+SIG_BACKFILL = 1   # snapshot reconstructed by replaying conditions.report over history
+
+_SIGNALS_DDL = """
+CREATE TABLE IF NOT EXISTS signals_1h (
+    ts_begin        INTEGER PRIMARY KEY,   -- hour boundary the snapshot is AS OF (window end)
+    window_hours    INTEGER,
+    verdict         TEXT,                  -- overall green / yellow / red / gray
+    vol_sigma_pct   REAL,    vol_status      TEXT,
+    regime_er       REAL,    regime_status   TEXT,
+    drawdown_pct    REAL,    drawdown_status TEXT,
+    harvest_swung   INTEGER, harvest_status  TEXT,
+    flow_imb        REAL,    flow_status     TEXT,
+    source          INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SIGNALS_INSERT = (
+    "INSERT OR REPLACE INTO signals_1h "
+    "(ts_begin, window_hours, verdict, vol_sigma_pct, vol_status, regime_er, regime_status, "
+    " drawdown_pct, drawdown_status, harvest_swung, harvest_status, flow_imb, flow_status, source) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+
+def _hour_floor(ms):
+    return ms - (ms % 3_600_000)
+
+
+def _ensure_signals_table(conn):
+    conn.execute(_SIGNALS_DDL)
+
+
+def _signal_row(conn, ts_end_ms, window_hours, source):
+    """Compute a conditions snapshot AS OF ts_end_ms and flatten it to a signals_1h
+    row tuple. Uses the SAME conditions.report the live dashboard calls, so a stored
+    row can never diverge from what the page would show for that instant."""
+    rep = conditions.report(conn, now_ms=ts_end_ms, window_hours=window_hours)
+    by = {m.get("label", ""): m for m in rep.get("metrics", [])}
+
+    def field(prefix, key):
+        for lbl, m in by.items():
+            if lbl.startswith(prefix):
+                return m.get(key)
+        return None
+
+    return (ts_end_ms, window_hours, rep.get("verdict"),
+            field("hourly volatility", "value"),  field("hourly volatility", "status"),
+            field("regime", "value"),             field("regime", "status"),
+            field("drawdown from high", "value"), field("drawdown from high", "status"),
+            field("harvest rate", "value"),       field("harvest rate", "status"),
+            field("flow imbalance", "value"),     field("flow imbalance", "status"),
+            source)
+
+
+def _write_signal_hours(conn, first_hour, last_hour, source, window_hours, log_every=0):
+    """Upsert one signals_1h row per top-of-hour in [first_hour, last_hour]."""
+    if first_hour > last_hour:
+        return 0
+    n, batch, t = 0, [], first_hour
+    while t <= last_hour:
+        batch.append(_signal_row(conn, t, window_hours, source))
+        n += 1
+        if log_every and n % log_every == 0:
+            log.info("  ... %d snapshots (through %s)", n, _utc(t))
+        if len(batch) >= 2000:
+            conn.executemany(_SIGNALS_INSERT, batch); conn.commit(); batch = []
+        t += 3_600_000
+    if batch:
+        conn.executemany(_SIGNALS_INSERT, batch); conn.commit()
+    return n
+
+
+def _signals_incremental(conn, window_hours, overlap_hours=2):
+    """Upsert signals_1h (source=SIG_LIVE) for the hours newly covered by ohlc_1m,
+    plus a small trailing overlap so late silent-minute backfills refresh recent
+    rows. Bootstraps to just the trailing day if the table is empty, so the hourly
+    append never accidentally triggers a full-history backfill (that is build-signals)."""
+    _ensure_signals_table(conn)
+    mx = conn.execute("SELECT MAX(ts_begin) FROM ohlc_1m").fetchone()[0]
+    if mx is None:
+        return 0
+    end = _hour_floor(mx)
+    last_sig = conn.execute("SELECT MAX(ts_begin) FROM signals_1h").fetchone()[0]
+    if last_sig is None:
+        start = end - 24 * 3_600_000
+    else:
+        start = _hour_floor(last_sig) - overlap_hours * 3_600_000
+    return _write_signal_hours(conn, start, end, SIG_LIVE, window_hours)
 
 
 def _tape_min_max(tape_path):
@@ -281,8 +381,20 @@ def cmd_append(args):
     # downtime instrument: keep rich data, do not prune the warehouse (live db prunes itself)
     rollup.run_once(config.HISTORY_DB_PATH, config.ROLLUP_INTERVALS_MIN,
                     config.ROLLUP_LOOKBACK_HOURS, NO_PRUNE_RETENTION_DAYS, full=False)
-    log.info("appended %d bars, %d trades, %d spread rows (ohlc since %s)",
-             n, nt, ns, _utc(have) if have else "start")
+    # (d) conditions snapshots — record the analysis-page grid signals as an hourly
+    #     time series (this is where flow imbalance gets captured going forward).
+    #     Non-fatal: a snapshot failure must never break the raw-data append.
+    nsig = 0
+    try:
+        sconn = _connect(config.HISTORY_DB_PATH)
+        try:
+            nsig = _signals_incremental(sconn, conditions.WINDOW_HOURS)
+        finally:
+            sconn.close()
+    except Exception as e:
+        log.warning("signals_1h snapshot failed (non-fatal): %r", e)
+    log.info("appended %d bars, %d trades, %d spread rows, %d signal snapshots (ohlc since %s)",
+             n, nt, ns, nsig, _utc(have) if have else "start")
     return n
 
 
@@ -427,6 +539,38 @@ def _utc(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
+def cmd_build_signals(args):
+    """Backfill signals_1h: replay conditions.report HOURLY over the entire OHLC
+    history (one row per top-of-hour, as of that hour). Deterministic replay using
+    the same code the live snapshot uses, so the stored series can never diverge
+    from what the dashboard would render. Flow imbalance is NULL before the trade
+    tape exists (deep history is OHLC-only); every other signal is reconstructed
+    in full. Idempotent — INSERT OR REPLACE, safe to re-run."""
+    if not os.path.exists(config.HISTORY_DB_PATH):
+        raise SystemExit("history.db does not exist — run `build` first")
+    window = conditions.WINDOW_HOURS
+    conn = _connect(config.HISTORY_DB_PATH)
+    try:
+        _ensure_signals_table(conn)
+        mn, mx = conn.execute("SELECT MIN(ts_begin), MAX(ts_begin) FROM ohlc_1m").fetchone()
+        if mn is None:
+            raise SystemExit("no ohlc_1m bars to backfill from")
+        need = mn + window * 3_600_000           # first instant with a full window
+        first = _hour_floor(need)
+        if first < need:
+            first += 3_600_000                   # round UP to a full-window hour
+        last = _hour_floor(mx)
+        hours = max(0, (last - first) // 3_600_000 + 1)
+        log.info("backfill signals_1h: %s -> %s (window %dh, ~%d hours)",
+                 _utc(first), _utc(last), window, hours)
+        t0 = time.time()
+        n = _write_signal_hours(conn, first, last, SIG_BACKFILL, window, log_every=10000)
+    finally:
+        conn.close()
+    log.info("backfill signals_1h: wrote %d rows in %.1fs", n, time.time() - t0)
+    cmd_status(args)
+
+
 def cmd_status(args):
     if not os.path.exists(config.HISTORY_DB_PATH):
         print("history.db does not exist yet")
@@ -449,6 +593,15 @@ def cmd_status(args):
                     "SELECT interval_min, COUNT(*), MIN(ts_begin), MAX(ts_begin) "
                     "FROM rollup_bars GROUP BY interval_min ORDER BY interval_min"):
                 print(f"    {iv:>5}m: {cnt:,} bars · {_utc(rmn)} -> {_utc(rmx)}")
+            if c.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                         "AND name='signals_1h'").fetchone():
+                scnt, smn, smx = c.execute(
+                    "SELECT COUNT(*), MIN(ts_begin), MAX(ts_begin) FROM signals_1h").fetchone()
+                if scnt:
+                    nbf = c.execute("SELECT COUNT(*) FROM signals_1h WHERE source=?",
+                                    (SIG_BACKFILL,)).fetchone()[0]
+                    print(f"  signals_1h: {scnt:,} hourly snapshots · {_utc(smn)} -> {_utc(smx)} "
+                          f"({nbf:,} backfilled, {scnt-nbf:,} live)")
             db_mb = os.path.getsize(config.HISTORY_DB_PATH) / 1e6
             print(f"  db size: {db_mb:.0f} MB")
     finally:
@@ -463,11 +616,13 @@ def main():
     b = sub.add_parser("build"); b.add_argument("--csv-dir", default=None)
     sub.add_parser("refill")
     sub.add_parser("append")
+    sub.add_parser("build-signals")
     sub.add_parser("backup")
     sub.add_parser("status")
     args = p.parse_args()
     {"build": cmd_build, "refill": cmd_refill, "append": cmd_append,
-     "backup": cmd_backup, "status": cmd_status}[args.cmd](args)
+     "build-signals": cmd_build_signals, "backup": cmd_backup,
+     "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":
