@@ -218,7 +218,9 @@ with what the dashboard renders for a given instant. (`conditions.report()` take
 peeks past its as-of time.)
 
 - **Backfill the full history:** `python -m tape.warehouse build-signals` — replays
-  hourly across the whole ~9.5y (~83k rows), idempotent (`INSERT OR REPLACE`).
+  hourly across the whole ~9.5y, idempotent (`INSERT OR REPLACE`). **Run 2026-06-07:
+  83,017 rows, 2016-12-17 14:00 → 2026-06-07 14:00** (the first ~24h has no full
+  trailing window and is skipped).
 - **Going forward:** the hourly `warehouse-append` writes new rows automatically
   (see `_signals_incremental` in `warehouse.py`) — no extra service or timer.
 
@@ -226,7 +228,9 @@ Provenance: a `source` column flags each row `1` = backfilled / `0` = live.
 **Flow imbalance is NULL before 2026-06-02** — it needs the trade tape, which only
 exists from the live-collector era; the other four signals (vol, regime, drawdown,
 harvest) reconstruct across the entire history. `status` is `gray` where a window
-lacked the data to compute a metric (e.g. flow over the pre-tape span).
+lacked the data to compute a metric (e.g. flow over the pre-tape span). At the
+2026-06-07 backfill, flow was populated for 122 rows (from 2026-06-02 13:00); the
+verdict — which excludes flow — is full-depth across all 83,017 rows.
 
 ## Dashboard performance (two clocks — keep heavy queries off the 2s path)
 
